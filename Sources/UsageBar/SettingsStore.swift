@@ -41,15 +41,21 @@ final class SettingsStore: ObservableObject {
     func save() {
         let snapshot = settings
         writeQueue.async {
+            // Private to this user: settings can hold a DeepSeek token.
             try? FileManager.default.createDirectory(
                 at: SettingsStore.directory,
-                withIntermediateDirectories: true
+                withIntermediateDirectories: true,
+                attributes: [.posixPermissions: 0o700]
             )
+            try? FileManager.default.setAttributes([.posixPermissions: 0o700],
+                                                   ofItemAtPath: SettingsStore.directory.path)
             let encoder = JSONEncoder()
             encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
             encoder.dateEncodingStrategy = .iso8601
             guard let data = try? encoder.encode(snapshot) else { return }
             try? data.write(to: SettingsStore.fileURL, options: .atomic)
+            try? FileManager.default.setAttributes([.posixPermissions: 0o600],
+                                                   ofItemAtPath: SettingsStore.fileURL.path)
         }
     }
 }

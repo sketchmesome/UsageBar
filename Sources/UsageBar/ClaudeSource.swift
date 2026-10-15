@@ -5,6 +5,8 @@ import Foundation
 struct ClaudeReading {
     var fiveHourLeft: Double?
     var weekLeft: Double?
+    /// When the weekly window resets, when known.
+    var weekReset: Date? = nil
     /// Plan name from `~/.claude.json` `oauthAccount.organizationType`
     /// (SPEC §13 continued).
     var planName: String?
@@ -41,10 +43,13 @@ final class ClaudeSource: UsageSource {
         // rate-limited cases. Comparing timestamps keeps a cached API snapshot
         // from beating a seconds-old status-line write.
         let api = apiReading(now: now, force: force)
-        // An explicit refresh asked for live data: when the API answers, use it
-        // rather than letting a local file written during the request win on a
-        // timestamp.
-        if force, let api { return api }
+        // An explicit refresh asked for live data: when the API actually answered
+        // just now, use it rather than letting a local file written during the
+        // request win on a timestamp. A cached snapshot (e.g. while rate-limited)
+        // competes on its timestamp like the rest.
+        if force, let api, (api.row.updated ?? .distantPast) >= now {
+            return withWaitNote(api, now: now)
+        }
 
         let candidates = [api, liveReading(now: now), desktopReading(now: now)]
             .compactMap { $0 }
@@ -53,7 +58,17 @@ final class ClaudeSource: UsageSource {
             let at = candidate.row.updated ?? .distantPast
             if best == nil || at > (best!.row.updated ?? .distantPast) { best = candidate }
         }
-        return best ?? manualReading(settings: settings, planName: claudePlanName(now: now))
+        return withWaitNote(best ?? manualReading(settings: settings, planName: claudePlanName(now: now)), now: now)
+    }
+
+    /// Says why the number isn't moving while Anthropic has asked us to wait,
+    /// whichever source ended up on the row.
+    private func withWaitNote(_ reading: ClaudeReading, now: Date) -> ClaudeReading {
+        guard let until = ClaudeUsageAPI.rateLimitedUntil(now: now) else { return reading }
+        var out = reading
+        let note = "Anthropic asked to wait · retry \(clockTime(until))"
+        out.row.footnote = [reading.row.footnote, note].compactMap { $0 }.joined(separator: " · ")
+        return out
     }
 
     /// Live usage straight from Anthropic's usage endpoint. Works whichever way
@@ -81,6 +96,7 @@ final class ClaudeSource: UsageSource {
         return ClaudeReading(
             fiveHourLeft: fiveLeft,
             weekLeft: weekLeft,
+            weekReset: snapshot.week?.resetsAt,
             planName: plan,
             row: UsageRow(
                 id: id,
@@ -125,6 +141,7 @@ final class ClaudeSource: UsageSource {
         return ClaudeReading(
             fiveHourLeft: five?.left,
             weekLeft: week?.left,
+            weekReset: week?.reset,
             planName: plan,
             row: UsageRow(
                 id: id,
@@ -177,7 +194,8 @@ final class ClaudeSource: UsageSource {
             if let loggedInOrg, (sample["org"] as? String) != loggedInOrg { continue }
             if matched == nil || at > matched!.at { matched = entry }
         }
-        guard let chosen = matched ?? anyOrg else { return nil }
+        // When we know who's logged in, only their own samples count.
+        guard let chosen = loggedInOrg == nil ? anyOrg : matched else { return nil }
 
         let fiveLeft = chosen.fiveUsed.map { max(0, min(100, 100 - $0)) }
         let weekLeft = chosen.weekUsed.map { max(0, min(100, 100 - $0)) }

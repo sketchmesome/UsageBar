@@ -1,29 +1,43 @@
 #!/bin/bash
-# Builds UsageBar in release mode, assembles UsageBar.app, ad-hoc signs it,
-# and zips it to ~/Downloads/UsageBar.zip.
+# Builds UsageBar in release mode, assembles build/UsageBar.app and ad-hoc
+# signs it. ZIP=1 also writes ~/Downloads/UsageBar.zip (for a release);
+# UNIVERSAL=1 adds an Intel slice.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
-echo "==> swift build -c release"
-swift build -c release
+# Compiler output lives in ~/Library/Caches (purgeable, never synced), not in
+# the project folder, which may sit in an iCloud-synced Documents folder.
+SCRATCH="${USAGEBAR_BUILD_DIR:-$HOME/Library/Caches/UsageBar-build}"
 
-BIN="$(swift build -c release --show-bin-path)/UsageBar"
+# Every temp folder this script makes is removed on exit, success or not.
+TEMP_DIRS=()
+cleanup() { for dir in "${TEMP_DIRS[@]+"${TEMP_DIRS[@]}"}"; do rm -rf "$dir"; done; }
+trap cleanup EXIT
+
+# UNIVERSAL=1 builds Apple silicon and Intel explicitly (whatever this Mac is)
+# and merges them into one binary, for release downloads. A plain build is
+# native-only, which is all install.sh needs.
+if [[ "${UNIVERSAL:-0}" == 1 ]]; then
+    SLICES=()
+    for triple in arm64-apple-macosx14.0 x86_64-apple-macosx14.0; do
+        echo "==> swift build -c release ($triple)"
+        swift build -c release --scratch-path "$SCRATCH" --triple "$triple"
+        SLICES+=("$(swift build -c release --scratch-path "$SCRATCH" --triple "$triple" --show-bin-path)/UsageBar")
+    done
+    UNI_DIR="$(mktemp -d "${TMPDIR:-/tmp}/usagebar-universal.XXXXXX")"
+    TEMP_DIRS+=("$UNI_DIR")
+    lipo -create "${SLICES[@]}" -output "$UNI_DIR/UsageBar"
+    BIN="$UNI_DIR/UsageBar"
+else
+    echo "==> swift build -c release"
+    swift build -c release --scratch-path "$SCRATCH"
+    BIN="$(swift build -c release --scratch-path "$SCRATCH" --show-bin-path)/UsageBar"
+fi
 if [[ ! -x "$BIN" ]]; then
     echo "error: built binary not found at $BIN" >&2
     exit 1
-fi
-
-# UNIVERSAL=1 also builds for Intel and merges both into one binary (used for
-# release downloads). A plain build is native-only, which is all install.sh needs.
-if [[ "${UNIVERSAL:-0}" == 1 ]]; then
-    echo "==> swift build -c release (x86_64)"
-    swift build -c release --triple x86_64-apple-macosx14.0
-    X86_BIN="$(swift build -c release --triple x86_64-apple-macosx14.0 --show-bin-path)/UsageBar"
-    UNI_DIR="$(mktemp -d "${TMPDIR:-/tmp}/usagebar-universal.XXXXXX")"
-    lipo -create "$BIN" "$X86_BIN" -output "$UNI_DIR/UsageBar"
-    BIN="$UNI_DIR/UsageBar"
 fi
 
 # Assemble and sign in a staging directory outside the repo. The repo lives in a
@@ -31,7 +45,7 @@ fi
 # freshly created .app directory; codesign refuses that detritus. Staging in a
 # temp dir keeps signing deterministic, then we copy the signed bundle back.
 STAGE="$(mktemp -d "${TMPDIR:-/tmp}/usagebar-stage.XXXXXX")"
-trap 'rm -rf "$STAGE"' EXIT
+TEMP_DIRS+=("$STAGE")
 
 STAGED_APP="$STAGE/UsageBar.app"
 echo "==> assembling $STAGED_APP"
@@ -62,9 +76,9 @@ cat > "$STAGED_APP/Contents/Info.plist" <<'PLIST'
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleShortVersionString</key>
-    <string>1.0</string>
+    <string>1.2</string>
     <key>CFBundleVersion</key>
-    <string>1</string>
+    <string>3</string>
     <key>LSUIElement</key>
     <true/>
     <key>LSMinimumSystemVersion</key>
@@ -89,12 +103,14 @@ mkdir -p "$ROOT/build"
 ditto --norsrc --noextattr "$STAGED_APP" "$APP"
 dot_clean "$APP" 2>/dev/null || true
 
-DEST="$HOME/Downloads/UsageBar.zip"
-echo "==> zipping to $DEST"
-mkdir -p "$HOME/Downloads"
-rm -f "$DEST"
-# Zip the clean, signed staging copy so the archive carries no detritus.
-ditto -c -k --keepParent --norsrc "$STAGED_APP" "$DEST"
+if [[ "${ZIP:-0}" == 1 ]]; then
+    DEST="$HOME/Downloads/UsageBar.zip"
+    echo "==> zipping to $DEST"
+    mkdir -p "$HOME/Downloads"
+    rm -f "$DEST"
+    # Zip the clean, signed staging copy so the archive carries no detritus.
+    ditto -c -k --keepParent --norsrc "$STAGED_APP" "$DEST"
+    echo "==> zip:  $DEST"
+fi
 
 echo "==> done: $APP"
-echo "==> zip:  $DEST"

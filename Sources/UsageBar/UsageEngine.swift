@@ -15,6 +15,8 @@ struct RefreshResult {
     var fx: FX
     /// Live plan/price values discovered this refresh (SPEC §13 continued).
     var live: LivePlanValues
+    /// OpenCode Go $/h now vs usual, from the local database.
+    var opencodePace: OpenCodePace?
 }
 
 /// Runs every source concurrently off the main thread and assembles one result.
@@ -36,6 +38,7 @@ final class UsageEngine {
         var claudeReading: ClaudeReading?
         var grokReading: GrokReading?
         var opencodeReading: OpenCodeReading?
+        var opencodePace: OpenCodePace?
         var deepseekBalance: Money?
         var vps: VPSStatus?
         var billing: VPSBilling?
@@ -83,8 +86,10 @@ final class UsageEngine {
         }
         submit(2) { [opencode] in
             let reading = opencode.reading(settings: settings, now: now, forceReload: forceOpenCode, fx: fx)
+            let pace = OpenCodeDatabase.pace(now: now)
             box.lock.lock()
             box.opencodeReading = reading
+            box.opencodePace = pace
             box.lock.unlock()
             return reading.row
         }
@@ -115,6 +120,7 @@ final class UsageEngine {
         let claudeReading = box.claudeReading
         let grokReading = box.grokReading
         let opencodeReading = box.opencodeReading
+        let opencodePace = box.opencodePace
         let deepseekBalance = box.deepseekBalance
         let billing = box.billing
         let vpsStatus = box.vps
@@ -155,7 +161,11 @@ final class UsageEngine {
             deepseekOriginalBalance: deepseekBalance,
             totalSpend: spendOutcome.total,
             vpsDays: due.days,
-            vpsDiskUsedPercent: Self.diskUsedPercent(vpsStatus)
+            vpsDiskUsedPercent: Self.diskUsedPercent(vpsStatus),
+            claudeWeekReset: claudeReading?.weekReset,
+            codexWeekReset: reading?.weekReset,
+            opencodeWeekReset: opencodeReading?.reused == true ? nil : opencodeReading?.weekReset,
+            grokReset: grokReading?.reset
         )
 
         return RefreshResult(
@@ -168,7 +178,8 @@ final class UsageEngine {
             billing: billing,
             menuBarValues: menuBarValues,
             fx: fx,
-            live: live
+            live: live,
+            opencodePace: opencodePace
         )
     }
 

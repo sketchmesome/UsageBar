@@ -9,13 +9,25 @@ struct PopoverView: View {
     let vpsConfigured: Bool
     let vpsNote: String?
     let vpsSummary: VPSSummary
+    /// Disk growth and time to full, when there's enough history.
+    var diskTrend: String? = nil
+    /// Row ids in menu bar order (left to right); these rows come first.
+    var rowOrder: [String] = []
     let onRefresh: () -> Void
     let onSettings: () -> Void
     let onSignIn: () -> Void
     let onQuit: () -> Void
 
     /// Everything except the VPS due-date row, which lives in the VPS section.
-    private var mainRows: [UsageRow] { rows.filter { $0.id != "vps" } }
+    /// Rows shown in the menu bar come first, in its order; the rest keep
+    /// their usual order after them.
+    private var mainRows: [UsageRow] {
+        let main = rows.filter { $0.id != "vps" }
+        func rank(_ row: UsageRow) -> Int { rowOrder.firstIndex(of: row.id) ?? rowOrder.count }
+        return main.enumerated()
+            .sorted { (rank($0.element), $0.offset) < (rank($1.element), $1.offset) }
+            .map(\.element)
+    }
     private var vpsRow: UsageRow? { rows.first { $0.id == "vps" } }
 
     private var openCodeNeedsSignIn: Bool {
@@ -53,12 +65,15 @@ struct PopoverView: View {
             HStack(spacing: 8) {
                 Button("Refresh", action: onRefresh)
                 Button("Settings…", action: onSettings)
-                Spacer()
+                Spacer(minLength: 0)
                 // Only ask to sign in when the console actually said so; otherwise
                 // the same window just opens the console page.
-                Button(openCodeNeedsSignIn ? "Sign in to OpenCode…" : "Open OpenCode console…", action: onSignIn)
+                Button(openCodeNeedsSignIn ? "Sign in to OpenCode…" : "OpenCode…", action: onSignIn)
+                    .help("Open the OpenCode console")
                 Button("Quit", action: onQuit)
             }
+            .lineLimit(1)
+            .fixedSize(horizontal: false, vertical: true)
         }
         .transaction { $0.animation = nil; $0.disablesAnimations = true }
         .padding(14)
@@ -95,7 +110,7 @@ struct PopoverView: View {
 
             if let vps {
                 let lines = [
-                    ("Disk", vps.diskLine),
+                    ("Disk", vps.diskLine.map { [$0, diskTrend].compactMap { $0 }.joined(separator: " · ") }),
                     ("RAM", vps.ramLine),
                     ("Load", vps.loadLine),
                     ("Uptime", vps.uptimeLine)

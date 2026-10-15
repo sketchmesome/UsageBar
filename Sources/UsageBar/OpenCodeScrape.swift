@@ -179,6 +179,20 @@ final class OffscreenScraper: NSObject, WKNavigationDelegate {
         webView?.stopLoading()
         webView?.navigationDelegate = nil
         webView = nil
+        Self.clearCaches()
         completion(result)
+    }
+
+    /// Each load would otherwise leave the console's scripts and assets in
+    /// ~/Library/Caches, growing it over time. Only caches are removed:
+    /// cookies and site storage (the OpenCode sign-in) are kept.
+    static func clearCaches() {
+        let types: Set<String> = [
+            WKWebsiteDataTypeDiskCache,
+            WKWebsiteDataTypeMemoryCache,
+            WKWebsiteDataTypeFetchCache,
+            WKWebsiteDataTypeOfflineWebApplicationCache
+        ]
+        WKWebsiteDataStore.default().removeData(ofTypes: types, modifiedSince: .distantPast) {}
     }
 }

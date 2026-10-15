@@ -4,6 +4,8 @@ import Foundation
 struct WindowValues {
     var used: Double?
     var cap: Double?
+    /// "Resets in 1h 42m" next to the window, relative to the page load.
+    var resetIn: TimeInterval?
 }
 
 struct OpenCodeParsedUsage {
@@ -13,6 +15,9 @@ struct OpenCodeParsedUsage {
     var limitFiveHour: Double?
     var limitWeek: Double?
     var limitMonth: Double?
+    var fiveHourResetIn: TimeInterval?
+    var weekResetIn: TimeInterval?
+    var monthResetIn: TimeInterval?
     var planName: String?
     var monthlyPrice: Double?
     var needsSignIn = false
@@ -48,6 +53,10 @@ enum OpenCodeParser {
         result.limitWeek = hook.week.cap ?? text.week.cap
         result.limitMonth = hook.month.cap ?? text.month.cap
 
+        result.fiveHourResetIn = text.five.resetIn
+        result.weekResetIn = text.week.resetIn
+        result.monthResetIn = text.month.resetIn
+
         result.planName = hookPlanName(payload.hook) ?? textPlanName(payload.text)
         result.monthlyPrice = hookMonthlyPrice(payload.hook) ?? textMonthlyPrice(payload.text)
 
@@ -70,7 +79,13 @@ enum OpenCodeParser {
             pattern: "5[- ]?h(our)?|rolling|week|month", options: [.caseInsensitive]
         ) else { return (five, week, month) }
         let range = NSRange(text.startIndex..<text.endIndex, in: text)
-        let matches = labels.matches(in: text, range: range)
+        // A countdown such as "Resets in 5h 42m" is not a window label.
+        let matches = labels.matches(in: text, range: range).filter { match in
+            let ns = text as NSString
+            let lineStart = ns.lineRange(for: NSRange(location: match.range.location, length: 0)).location
+            let prefix = ns.substring(with: NSRange(location: lineStart, length: match.range.location - lineStart))
+            return !prefix.lowercased().contains("reset")
+        }
         for (index, match) in matches.enumerated() {
             guard let labelRange = Range(match.range, in: text) else { continue }
             let end = index + 1 < matches.count ? matches[index + 1].range.location : range.length
@@ -78,7 +93,8 @@ enum OpenCodeParser {
             guard let nearby = Range(nearbyRange, in: text) else { continue }
             // Never borrow a value from the next window's label.
             let window = text[nearby].components(separatedBy: .newlines).prefix(4).joined(separator: " ")
-            guard let values = extractWindow(window), values.used != nil || values.cap != nil else { continue }
+            guard var values = extractWindow(window), values.used != nil || values.cap != nil else { continue }
+            values.resetIn = resetInterval(window)
             let label = text[labelRange].lowercased()
             if label.contains("month") {
                 if month.used == nil { month = values }
@@ -89,6 +105,29 @@ enum OpenCodeParser {
             }
         }
         return (five, week, month)
+    }
+
+    /// "Resets in 3d 11h", "resets in 1h 42m", "Resets in 2 hours 59 minutes",
+    /// "resets in 0m" → seconds. 0 means the reset is imminent.
+    static func resetInterval(_ string: String) -> TimeInterval? {
+        let unitPattern = "(\\d+)\\s*(days?|d|hours?|hrs?|h|minutes?|mins?|m)\\b"
+        guard let regex = try? NSRegularExpression(
+            pattern: "resets?\\s+in\\s+((?:\\d+\\s*(?:days?|d|hours?|hrs?|h|minutes?|mins?|m)\\b[\\s,]*(?:and\\s+)?)+)",
+            options: [.caseInsensitive]
+        ), let match = regex.firstMatch(in: string, range: NSRange(string.startIndex..., in: string)),
+              let spanRange = Range(match.range(at: 1), in: string),
+              let unit = try? NSRegularExpression(pattern: unitPattern, options: [.caseInsensitive])
+        else { return nil }
+        let span = String(string[spanRange])
+        var seconds: TimeInterval = 0
+        var matched = false
+        for part in unit.matches(in: span, range: NSRange(span.startIndex..., in: span)) {
+            guard let n = Range(part.range(at: 1), in: span).flatMap({ Double(span[$0]) }),
+                  let u = Range(part.range(at: 2), in: span).map({ span[$0].lowercased() }) else { continue }
+            matched = true
+            seconds += n * (u.hasPrefix("d") ? 86_400 : u.hasPrefix("h") ? 3_600 : 60)
+        }
+        return matched ? seconds : nil
     }
 
     /// A window's used% and cap from either `$a / $b` or `NN%`.

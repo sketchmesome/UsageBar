@@ -37,6 +37,18 @@ enum MenuBarItem: String, Codable, CaseIterable, Identifiable {
 
     var id: String { rawValue }
 
+    /// The popover row this item comes from, if any.
+    var rowID: String? {
+        switch self {
+        case .claude5h, .claudeWeek: return "claude"
+        case .codex5h, .codexWeek: return "codex"
+        case .opencode5h, .opencodeWeek: return "opencode"
+        case .grok: return "grok"
+        case .deepseek: return "deepseek"
+        case .vpsDays, .vpsDisk, .totalSpend: return nil
+        }
+    }
+
     /// Short label used in labelled mode (SPEC §12).
     var label: String {
         switch self {
@@ -126,6 +138,11 @@ struct MenuBarValues {
     var totalSpend: String?
     var vpsDays: Int?
     var vpsDiskUsedPercent: Double?
+    /// Weekly reset times, for the daily burn (live readings only).
+    var claudeWeekReset: Date? = nil
+    var codexWeekReset: Date? = nil
+    var opencodeWeekReset: Date? = nil
+    var grokReset: Date? = nil
 }
 
 /// The exact status-item presentation for a given mode + values. Compared with

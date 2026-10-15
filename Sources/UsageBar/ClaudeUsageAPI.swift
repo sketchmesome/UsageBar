@@ -46,15 +46,25 @@ enum ClaudeUsageAPI {
     /// The server's stand-down after a 429. Honoured even by an explicit
     /// refresh, since it is the endpoint telling us to wait.
     private static var rateLimitedUntil: Date?
+    /// 429s in a row, for the doubling stand-down. Reset by a success.
+    private static var consecutiveRateLimits = 0
 
     /// Between requests; also the window in which a snapshot may be reused.
-    /// Just under the shortest refresh interval (2 min), so every tick may ask.
-    private static let minimumInterval: TimeInterval = 100
+    /// Just under 3 min: the endpoint rate-limits, so background refreshes
+    /// don't ask more often than this (an explicit Refresh always may).
+    private static let minimumInterval: TimeInterval = 170
+    /// Even an explicit Refresh waits this long between requests, so clicking
+    /// it repeatedly can't hammer the endpoint.
+    private static let forcedMinimumInterval: TimeInterval = 30
     /// A cached snapshot older than this is not shown as live at all — better to
     /// fall back to a local source than to label stale numbers LIVE.
-    private static let maxCacheAge: TimeInterval = 1200
-    /// How long to stand down after a 429 (extended by `Retry-After`).
-    private static let rateLimitBackoff: TimeInterval = 1800
+    /// Covers the longest rate-limit stand-down, so a 429 keeps showing the last
+    /// real reading (with its age) rather than an older local file.
+    private static let maxCacheAge: TimeInterval = 1800
+    /// Stand-down after a 429 when the server gives no `Retry-After`: 5 min,
+    /// doubling on each further 429 in a row, up to 30 min.
+    private static let rateLimitBackoff: TimeInterval = 300
+    private static let maxRateLimitBackoff: TimeInterval = 1800
     /// An expired token is replaced by Claude Code on its next run, so retry
     /// soon — no request is sent while expired, only a cheap Keychain re-read.
     private static let expiredTokenBackoff: TimeInterval = 300
@@ -84,13 +94,15 @@ enum ClaudeUsageAPI {
         // honours it. The other stand-downs are ours, and a refresh may retry.
         let rateLimitedNow = rateLimited.map { now < $0 } ?? false
         let blockedNow = !force && (blocked.map { now < $0 } ?? false)
-        let tooSoon = !force && (claimed.map { elapsed(from: $0, to: now) < minimumInterval } ?? false)
+        let gap = force ? forcedMinimumInterval : minimumInterval
+        let tooSoon = claimed.map { elapsed(from: $0, to: now) < gap } ?? false
         // Claim and decide under one lock hold, so two callers can't both spend
         // a request.
         if !rateLimitedNow, !blockedNow, !tooSoon { lastAttempt = now }
         lock.unlock()
 
-        if rateLimitedNow || blockedNow { return nil }
+        // Waiting: keep showing the last real reading rather than nothing.
+        if rateLimitedNow || blockedNow { return reusableCache(cached, now: now) }
         if tooSoon { return reusableCache(cached, now: now) }
 
         switch credential(now: now) {
@@ -119,8 +131,14 @@ enum ClaudeUsageAPI {
             return nil
         }
         if status == 429 {
-            rateLimit(now: now, by: max(rateLimitBackoff, retryAfter ?? 0))
-            return nil
+            lock.lock()
+            let doubling = rateLimitBackoff * pow(2, Double(consecutiveRateLimits))
+            consecutiveRateLimits += 1
+            let cached = cachedSnapshot
+            lock.unlock()
+            // Anchored at the response's arrival, as Retry-After is relative to it.
+            rateLimit(now: acquiredAt, by: retryAfter.map { max(60, $0) } ?? min(maxRateLimitBackoff, doubling))
+            return reusableCache(cached, now: now)
         }
         guard status == 200, let body, let snapshot = parse(body, fetchedAt: acquiredAt) else { return nil }
 
@@ -128,8 +146,16 @@ enum ClaudeUsageAPI {
         cachedSnapshot = snapshot
         blockedUntil = nil          // a success clears every stand-down
         rateLimitedUntil = nil
+        consecutiveRateLimits = 0
         lock.unlock()
         return snapshot
+    }
+
+    /// When Anthropic's rate limit lets us ask again, if we're waiting on it.
+    static func rateLimitedUntil(now: Date) -> Date? {
+        lock.lock()
+        defer { lock.unlock() }
+        return rateLimitedUntil.flatMap { $0 > now ? $0 : nil }
     }
 
     /// The server's stand-down after a rate limit — kept separate from our own
@@ -261,6 +287,14 @@ enum ClaudeUsageAPI {
 
     // MARK: - Request
 
+    private static func httpDate(_ value: String) -> Date? {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = TimeZone(identifier: "GMT")
+        formatter.dateFormat = "EEE, dd MMM yyyy HH:mm:ss zzz"
+        return formatter.date(from: value.trimmingCharacters(in: .whitespaces))
+    }
+
     private static func get(token: String) -> (status: Int, retryAfter: TimeInterval?, body: [String: Any]?) {
         var request = URLRequest(url: endpoint)
         request.httpMethod = "GET"
@@ -282,8 +316,10 @@ enum ClaudeUsageAPI {
             defer { semaphore.signal() }
             guard let http = response as? HTTPURLResponse else { return }
             status = http.statusCode
-            if let value = http.value(forHTTPHeaderField: "Retry-After"), let seconds = Double(value) {
-                retryAfter = seconds
+            if let value = http.value(forHTTPHeaderField: "Retry-After") {
+                // Either delay-seconds or an HTTP-date (RFC 9110 §10.2.3).
+                retryAfter = Double(value.trimmingCharacters(in: .whitespaces))
+                    ?? httpDate(value).map { $0.timeIntervalSinceNow }
             }
             guard let data else { return }
             body = try? JSONSerialization.jsonObject(with: data) as? [String: Any]

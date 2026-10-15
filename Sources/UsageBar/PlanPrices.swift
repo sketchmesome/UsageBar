@@ -58,7 +58,7 @@ enum PlanPrices {
                 provider: "Claude", planKey: "claude_pro", usdMonthly: 20,
                 sourceURL: "https://claude.com/pricing", displayName: "Claude Pro"
             )
-        case "max", "max (5x)", "max 5x":
+        case "max (5x)", "max 5x", "max_5x":
             return PlanListPrice(
                 provider: "Claude", planKey: "claude_max", usdMonthly: 100,
                 sourceURL: "https://claude.com/pricing", displayName: "Claude Max (5x)"

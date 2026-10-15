@@ -3,6 +3,8 @@ import Foundation
 /// Grok's numeric value plus the finished row (SPEC §12).
 struct GrokReading {
     var percentLeft: Double?
+    /// When the weekly window resets, when known.
+    var reset: Date? = nil
     /// `usage.grokPlanLabel` from the cache (SPEC §13 continued).
     var planName: String?
     var row: UsageRow
@@ -52,6 +54,7 @@ final class GrokSource: UsageSource {
 
         return GrokReading(
             percentLeft: percentLeft,
+            reset: reset,
             planName: plan,
             row: UsageRow(
                 id: id,

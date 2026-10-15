@@ -11,6 +11,10 @@ struct OpenCodeReading {
     var capFiveHourUSD: Double?
     var capWeekUSD: Double?
     var capMonthUSD: Double?
+    /// When each window resets, from the console's "Resets in …" text.
+    var fiveHourReset: Date?
+    var weekReset: Date?
+    var monthReset: Date?
     /// True when this reading came from a previous load because the fresh one
     /// failed or carried nothing usable. Surfaced so the UI never presents a
     /// reused reading as current (SPEC §17).
@@ -87,7 +91,9 @@ final class OpenCodeSource: UsageSource {
 
         if !forceReload, let cached = cachedLoad,
            now.timeIntervalSince(cached.at) < interval,
-           !spendJumped(since: cached.at, now: now, snapshot: snapshot) {
+           !spendJumped(since: cached.at, now: now, snapshot: snapshot),
+           !resetPassed(OpenCodeParser.parse(payload: cached.payload, cap: settings.effectiveMonthlyCap),
+                        loadedAt: cached.at, now: now) {
             let parsed = OpenCodeParser.parse(payload: cached.payload, cap: settings.effectiveMonthlyCap)
             if parsed.hasAny || parsed.needsSignIn || parsed.hasPlanValues {
                 let reading = reading(from: cached.payload, settings: settings, fx: fx, stamp: cached.at, now: now)
@@ -101,6 +107,13 @@ final class OpenCodeSource: UsageSource {
             )
         }
 
+        // The bare console address shows no usage, so until the user pastes
+        // their own Go page there's nothing to load; don't spend a webview on it.
+        if urlString == Settings.defaultConsoleURL {
+            return fallbackReading(settings: settings, fx: fx, now: now,
+                                   note: "add your Console URL in Settings", debug: nil)
+        }
+
         guard let url = URL(string: urlString) else {
             return fallbackReading(settings: settings, fx: fx, now: now, note: "invalid console URL", debug: urlString)
         }
@@ -108,13 +121,17 @@ final class OpenCodeSource: UsageSource {
         switch scrape(url: url) {
         case .success(let payload):
             setFailure(nil)
+            // Stamped when the page was captured, not when the load started, so
+            // spend made while it loaded (already in the console's numbers)
+            // isn't added again by the live estimate.
+            let captured = max(now, Date())
             // Cache every successful load so the interval gate holds even when
             // the page carries nothing we can parse.
-            store(payload, at: now, url: urlString)
+            store(payload, at: captured, url: urlString)
             let parsed = OpenCodeParser.parse(payload: payload, cap: settings.effectiveMonthlyCap)
             if parsed.hasAny || parsed.needsSignIn || parsed.hasPlanValues {
-                storeGood(payload, at: now, url: urlString)
-                return reading(from: payload, settings: settings, fx: fx, stamp: now, now: now)
+                storeGood(payload, at: captured, url: urlString)
+                return reading(from: payload, settings: settings, fx: fx, stamp: captured, now: captured)
             }
             return reusedReading(
                 settings: settings, fx: fx, now: now, interval: interval,
@@ -212,6 +229,14 @@ final class OpenCodeSource: UsageSource {
         return snapshot.spentSince >= Self.reloadSpendJumpUSD || snapshot.limitHit
     }
 
+    /// True when a window the console reported has since reset, so the cached
+    /// numbers are known to be wrong and the page should be re-read.
+    private func resetPassed(_ parsed: OpenCodeParsedUsage, loadedAt: Date, now: Date) -> Bool {
+        [parsed.fiveHourResetIn, parsed.weekResetIn, parsed.monthResetIn]
+            .compactMap { $0 }
+            .contains { loadedAt.addingTimeInterval($0) <= now }
+    }
+
     /// Brings a console reading up to date with what the local OpenCode
     /// database has recorded since that load: the console's used % plus the
     /// new Go spend measured against the window's dollar cap (from the page,
@@ -224,35 +249,36 @@ final class OpenCodeSource: UsageSource {
         guard reading.row.tag == .live, reading.fiveHourLeft != nil || reading.weekLeft != nil,
               now.timeIntervalSince(stamp) >= 60,
               let base, let snapshot else { return reading }
-        let current = snapshot.spend
 
         // The manual cap override (SPEC §13) wins over console caps here too.
         let override = settings.opencodeOverride
         let fallbackCap = settings.effectiveMonthlyCap
-        func estimate(_ left: Double?, cap: Double?, then: Double, now: Double, share: Double) -> Double? {
+        // Only spend recorded since the console load is added (gross). Old
+        // local spend ageing out of a rolling sum is never handed back as
+        // allowance; the next console load is what confirms any recovery.
+        let spent = snapshot.spentSince
+        func estimate(_ left: Double?, cap: Double?, then: Double, share: Double) -> Double? {
             guard let left else { return nil }
             let used = 100 - left
             let capUSD = override
                 ? fallbackCap * share
                 : (cap ?? (used >= 2 && then >= 0.05 ? then / (used / 100) : fallbackCap * share))
             guard capUSD > 0 else { return left }
-            return leftPercent(used + (now - then) / capUSD * 100)
+            return leftPercent(used + spent / capUSD * 100)
         }
 
         var out = reading
         out.fiveHourLeft = estimate(reading.fiveHourLeft, cap: reading.capFiveHourUSD,
-                                    then: base.fiveHour, now: current.fiveHour, share: 0.20)
+                                    then: base.fiveHour, share: 0.20)
         out.weekLeft = estimate(reading.weekLeft, cap: reading.capWeekUSD,
-                                then: base.week, now: current.week, share: 0.50)
+                                then: base.week, share: 0.50)
         let limitHit = snapshot.limitHit
         if limitHit { out.fiveHourLeft = 0 }
 
-        let changed = abs(current.fiveHour - base.fiveHour) >= 0.005 || abs(current.week - base.week) >= 0.005
-        guard limitHit || changed else { return reading }
+        guard limitHit || spent >= 0.005 else { return reading }
 
-        var parts: [String] = []
-        if let five = out.fiveHourLeft { parts.append("5h: \(Int(five.rounded()))% left") }
-        if let week = out.weekLeft { parts.append("Week: \(Int(week.rounded()))% left") }
+        let parts = Self.windowParts(five: out.fiveHourLeft, week: out.weekLeft,
+                                     fiveReset: reading.fiveHourReset, weekReset: reading.weekReset)
         let note = limitHit
             ? "Go limit hit (OpenCode error)"
             : "est: $\(String(format: "%.2f", snapshot.spentSince)) spent since console check \(relativeAge(stamp, now: now))"
@@ -266,7 +292,9 @@ final class OpenCodeSource: UsageSource {
             updated: now,
             debug: reading.row.debug,
             alert: limitHit,
-            staleAfter: reading.row.staleAfter
+            // Stamped now, so the remaining budget is what's left of the
+            // console reading's own (which already ends at the next reset).
+            staleAfter: reading.row.staleAfter.map { max(0, stamp.addingTimeInterval($0).timeIntervalSince(now)) }
         )
         return out
     }
@@ -334,14 +362,20 @@ final class OpenCodeSource: UsageSource {
     private func primaryReading(parsed: OpenCodeParsedUsage, now: Date, staleAfter: TimeInterval?) -> OpenCodeReading {
         let fiveLeft = parsed.fiveHourUsed.map(leftPercent)
         let weekLeft = parsed.weekUsed.map(leftPercent)
-
-        var parts: [String] = []
-        if let fiveLeft { parts.append("5h: \(Int(fiveLeft.rounded()))% left") }
-        if let weekLeft { parts.append("Week: \(Int(weekLeft.rounded()))% left") }
+        let fiveReset = parsed.fiveHourResetIn.map { now.addingTimeInterval($0) }
+        let weekReset = parsed.weekResetIn.map { now.addingTimeInterval($0) }
+        let monthReset = parsed.monthResetIn.map { now.addingTimeInterval($0) }
+        let parts = Self.windowParts(five: fiveLeft, week: weekLeft, fiveReset: fiveReset, weekReset: weekReset)
+        // Once a window resets, the reading is known to be out of date.
+        let untilReset = [fiveReset, weekReset, monthReset].compactMap { $0 }.min()
+            .map { max(0, $0.timeIntervalSince(now)) }
+        let freshness = [staleAfter, untilReset].compactMap { $0 }.min()
 
         var footnotes: [String] = []
         if let plan = parsed.planName, !plan.isEmpty { footnotes.append(plan) }
-        if let used = parsed.monthUsed { footnotes.append("Month: \(percentLeft(used))% left") }
+        if let used = parsed.monthUsed {
+            footnotes.append("Month: \(percentLeft(used))% left" + (monthReset.map { " (resets \(shortDate($0)))" } ?? ""))
+        }
 
         return OpenCodeReading(
             fiveHourLeft: fiveLeft,
@@ -351,6 +385,9 @@ final class OpenCodeSource: UsageSource {
             capFiveHourUSD: parsed.limitFiveHour,
             capWeekUSD: parsed.limitWeek,
             capMonthUSD: parsed.limitMonth,
+            fiveHourReset: fiveReset,
+            weekReset: weekReset,
+            monthReset: monthReset,
             row: UsageRow(
                 id: id,
                 title: "OpenCode Go",
@@ -359,9 +396,21 @@ final class OpenCodeSource: UsageSource {
                 tag: .live,
                 updated: now,
                 debug: parsed.debug,
-                staleAfter: staleAfter
+                staleAfter: freshness
             )
         )
+    }
+
+    /// "5h: 0% left (resets 15:30)", "Week: 37% left (resets Sun 01:10)".
+    static func windowParts(five: Double?, week: Double?, fiveReset: Date?, weekReset: Date?) -> [String] {
+        var parts: [String] = []
+        if let five {
+            parts.append("5h: \(Int(five.rounded()))% left" + (fiveReset.map { " (resets \(clockTime($0)))" } ?? ""))
+        }
+        if let week {
+            parts.append("Week: \(Int(week.rounded()))% left" + (weekReset.map { " (resets \(weekdayTime($0)))" } ?? ""))
+        }
+        return parts
     }
 
     private func leftPercent(_ used: Double) -> Double {

@@ -149,8 +149,37 @@ enum CodexAppServer {
         for candidate in candidates where FileManager.default.isExecutableFile(atPath: candidate.path) {
             return candidate
         }
-        return nil
+        return shellResolved
     }
+
+    /// Other installs (npm, version managers): asked of the login shell once
+    /// per launch, since an app doesn't inherit the terminal's PATH.
+    private static let shellResolved: URL? = {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/bin/zsh")
+        process.arguments = ["-lc", "command -v codex"]
+        let pipe = Pipe()
+        process.standardOutput = pipe
+        process.standardError = FileHandle.nullDevice
+        process.standardInput = FileHandle.nullDevice
+        guard (try? process.run()) != nil else { return nil }
+        // Read on another thread with a deadline: a shell startup that leaves
+        // something holding stdout open must not stall refreshes.
+        var data = Data()
+        let done = DispatchSemaphore(value: 0)
+        DispatchQueue.global(qos: .utility).async {
+            data = pipe.fileHandleForReading.readDataToEndOfFile()
+            done.signal()
+        }
+        guard done.wait(timeout: .now() + 5) == .success else {
+            if process.isRunning { process.terminate() }
+            try? pipe.fileHandleForReading.close()
+            return nil
+        }
+        let path = String(decoding: data, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
+        guard path.hasPrefix("/"), FileManager.default.isExecutableFile(atPath: path) else { return nil }
+        return URL(fileURLWithPath: path)
+    }()
 
     /// Accumulates stdout, splits it into JSON-RPC messages, and lets a caller
     /// wait for one specific id with a deadline.

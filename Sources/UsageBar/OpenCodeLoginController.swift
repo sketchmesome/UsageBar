@@ -7,6 +7,8 @@ import WebKit
 final class OpenCodeLoginController: NSObject, NSWindowDelegate {
     private var window: NSWindow?
     private var webView: WKWebView?
+    /// Called once the window closes, so a fresh sign-in shows straight away.
+    var onClose: (() -> Void)?
 
     func show(urlString: String) {
         if let window {
@@ -47,6 +49,8 @@ final class OpenCodeLoginController: NSObject, NSWindowDelegate {
     func windowWillClose(_ notification: Notification) {
         webView?.stopLoading()
         webView = nil
+        OffscreenScraper.clearCaches()
         window = nil
+        onClose?()
     }
 }

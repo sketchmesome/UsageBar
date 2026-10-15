@@ -15,11 +15,35 @@ fi
 
 bash Scripts/build_app.sh
 
-echo "==> installing to /Applications"
-pkill -x UsageBar 2>/dev/null && sleep 1 || true
-rm -rf /Applications/UsageBar.app
-ditto build/UsageBar.app /Applications/UsageBar.app
+# /Applications needs an admin account; otherwise use ~/Applications.
+DEST_DIR=/Applications
+if [[ ! -w "$DEST_DIR" ]]; then
+    DEST_DIR="$HOME/Applications"
+    mkdir -p "$DEST_DIR"
+fi
+APP="$DEST_DIR/UsageBar.app"
 
-open /Applications/UsageBar.app
+echo "==> installing to $DEST_DIR"
+# Copy and verify the new app first; the old one is only replaced once the
+# new one is known good.
+rm -rf "$APP.new"
+ditto build/UsageBar.app "$APP.new"
+codesign --verify "$APP.new"
+pkill -x UsageBar 2>/dev/null && sleep 1 || true
+# Keep the old app until the new one is in place; put it back on failure.
+rm -rf "$APP.old"
+if [[ -e "$APP" ]]; then mv "$APP" "$APP.old"; fi
+if ! mv "$APP.new" "$APP"; then
+    [[ -e "$APP.old" ]] && mv "$APP.old" "$APP"
+    echo "Couldn't install to $DEST_DIR; your previous UsageBar was left in place." >&2
+    exit 1
+fi
+rm -rf "$APP.old" || true
+
+# The compiler cache (~800 MB) is only needed to build; remove it. An update
+# (git pull && ./install.sh) simply rebuilds.
+rm -rf "$HOME/Library/Caches/UsageBar-build" || true
+
+open "$APP"
 echo
 echo "Done! UsageBar is in your menu bar (top right). Click it, then Settings… to set it up."

@@ -49,7 +49,8 @@ struct UsageRow: Identifiable {
     /// rows (which carry no `updated`) are never flagged.
     func isStale(now: Date) -> Bool {
         guard let staleAfter, let updated else { return false }
-        return now.timeIntervalSince(updated) > staleAfter
+        // A zero budget means "already out of date" (e.g. its window has reset).
+        return staleAfter <= 0 || now.timeIntervalSince(updated) > staleAfter
     }
 }
 

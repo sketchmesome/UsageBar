@@ -34,12 +34,12 @@ struct Settings: Codable {
     var opencodeConsoleURL: String = Settings.defaultConsoleURL
     var opencodeMonthlyCap: Double? = 80
 
-    // OpenCode console reload interval, minutes, clamped 15...240 (SPEC §10).
+    // OpenCode console reload interval, minutes, clamped 5...240 (SPEC §10).
     // Other sources keep using `refreshIntervalMinutes`.
-    var opencodeRefreshMinutes: Int = 60
+    var opencodeRefreshMinutes: Int = 15
 
-    // Refresh interval, minutes, clamped 5...30.
-    var refreshIntervalMinutes: Int = 10
+    // Refresh interval, minutes, clamped 2...30.
+    var refreshIntervalMinutes: Int = 3
 
     // Launch at login (SPEC §11).
     var launchAtLogin: Bool = true
@@ -173,8 +173,8 @@ struct Settings: Codable {
 
         opencodeConsoleURL = c.decodeOr(String.self, .opencodeConsoleURL, Settings.defaultConsoleURL)
         opencodeMonthlyCap = c.decodeOr(Double.self, .opencodeMonthlyCap, 80)
-        opencodeRefreshMinutes = c.decodeOr(Int.self, .opencodeRefreshMinutes, 60)
-        refreshIntervalMinutes = c.decodeOr(Int.self, .refreshIntervalMinutes, 10)
+        opencodeRefreshMinutes = c.decodeOr(Int.self, .opencodeRefreshMinutes, 15)
+        refreshIntervalMinutes = c.decodeOr(Int.self, .refreshIntervalMinutes, 3)
 
         launchAtLogin = c.decodeOr(Bool.self, .launchAtLogin, true)
 

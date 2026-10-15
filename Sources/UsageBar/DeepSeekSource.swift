@@ -50,7 +50,7 @@ final class DeepSeekSource: UsageSource {
             let vpsObject = findValue(forKey: "vps", in: json)
             let vps = VPSStatus.parse(vpsObject)
             let billing = VPSBilling.parse((vpsObject as? [String: Any])?["billing"])
-            let row = balance.value.map { balanceRow($0, fx: fx, now: now) }
+            let row = balance.value.map { balanceRow($0, split: balance.split, fx: fx, now: now) }
                 ?? manualRow(settings: settings, fx: fx, note: balance.note)
             return DeepSeekOutcome(
                 row: row,
@@ -74,12 +74,12 @@ final class DeepSeekSource: UsageSource {
 
     /// The live balance row shown on success. A prepaid top-up balance, so it
     /// stays in the currency it was topped up in rather than the display currency.
-    func balanceRow(_ balance: Money, fx: FX, now: Date) -> UsageRow {
+    func balanceRow(_ balance: Money, split: String? = nil, fx: FX, now: Date) -> UsageRow {
         UsageRow(
             id: id,
             title: "DeepSeek API",
             value: formatMoney(balance),
-            footnote: "balance",
+            footnote: split ?? "balance",
             tag: .live,
             updated: now
         )
@@ -150,16 +150,23 @@ final class DeepSeekSource: UsageSource {
     }
 
     /// Extracts the USD total from `balance_infos`, or a reason it is missing.
-    private func parseBalance(_ json: [String: Any]) -> (value: Money?, note: String?) {
+    /// `split` is DeepSeek's own breakdown of the total, e.g. "$9.13 topped up
+    /// + $0.73 granted" — the website lists these separately.
+    private func parseBalance(_ json: [String: Any]) -> (value: Money?, note: String?, split: String?) {
         guard let infos = json["balance_infos"] as? [[String: Any]], !infos.isEmpty else {
-            return (nil, "no balance_infos")
+            return (nil, "no balance_infos", nil)
         }
         let info = infos.first(where: { ($0["currency"] as? String)?.uppercased() == "USD" })
             ?? infos.first(where: { ($0["currency"] as? String)?.isEmpty == false && doubleValue($0["total_balance"]) != nil })
         guard let info, let currency = info["currency"] as? String,
               let total = doubleValue(info["total_balance"]), total.isFinite else {
-            return (nil, "no total_balance")
+            return (nil, "no total_balance", nil)
         }
-        return (Money(total, currency), nil)
+        var parts: [String] = []
+        if let topped = doubleValue(info["topped_up_balance"]) { parts.append("\(formatMoney(Money(topped, currency))) topped up") }
+        if let granted = doubleValue(info["granted_balance"]), granted > 0 {
+            parts.append("\(formatMoney(Money(granted, currency))) granted")
+        }
+        return (Money(total, currency), nil, parts.count == 2 ? parts.joined(separator: " + ") : nil)
     }
 }

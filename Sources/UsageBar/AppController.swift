@@ -12,6 +12,9 @@ final class AppController: NSObject, NSPopoverDelegate {
     private let loginController = OpenCodeLoginController()
     private let launchAtLogin = LaunchAtLoginController()
     private let alerts = UsageAlerts()
+    private let trends = Trends()
+    /// "+0.40 GB/day · fills in ~58 days", from the last refresh.
+    private var lastDiskTrend: String?
 
     private var timer: Timer?
     private var timerMinutes: Int?
@@ -42,6 +45,10 @@ final class AppController: NSObject, NSPopoverDelegate {
         statusItem.button?.target = self
         statusItem.button?.action = #selector(togglePopover(_:))
         applyMenuBar()
+        // A fresh sign-in shows straight away rather than at the next reload.
+        loginController.onClose = { [weak self] in
+            self?.refresh(force: true, reloadOpenCode: true, live: true)
+        }
 
         popover.animates = false
         popover.behavior = .transient
@@ -159,8 +166,43 @@ final class AppController: NSObject, NSPopoverDelegate {
                 measured: row.tag == .live || row.tag == .estimated
             )
         }
-        alerts.evaluate(values: result.menuBarValues, observations: observations,
-                        now: now, enabled: store.settings.usageAlerts)
+        let paceNotes = alerts.evaluate(values: result.menuBarValues, observations: observations,
+                                        opencodePace: result.opencodePace,
+                                        interval: TimeInterval(store.settings.clampedRefreshMinutes * 60),
+                                        now: now, enabled: store.settings.usageAlerts)
+        // Weekly daily burn, for measured (LIVE/EST) rows only.
+        let v = result.menuBarValues
+        let burnNotes: [String: String?] = [
+            "claude": WeeklyBurn.note(left: v.claudeWeekLeft, reset: v.claudeWeekReset, now: now),
+            "codex": WeeklyBurn.note(left: v.codexWeekLeft, reset: v.codexWeekReset, now: now),
+            "opencode": WeeklyBurn.note(left: v.opencodeWeekLeft, reset: v.opencodeWeekReset, now: now),
+            "grok": WeeklyBurn.note(left: v.grokPercentLeft, reset: v.grokReset, now: now)
+        ]
+        for index in rows.indices {
+            let id = rows[index].id
+            let fresh = observations[id].map { $0.measured && !$0.stale } ?? false
+            let burn = fresh ? burnNotes[id] ?? nil : nil
+            let extra = [paceNotes[id], burn].compactMap { $0 }
+            guard !extra.isEmpty else { continue }
+            // Pace and burn get their own line under the row's details.
+            rows[index].footnote = [rows[index].footnote, extra.joined(separator: " · ")]
+                .compactMap { $0 }.joined(separator: "\n")
+        }
+
+        // Days-long trends: DeepSeek runway and VPS disk growth.
+        let deepseekLive = rows.first { $0.id == "deepseek" }?.tag == .live
+        let trendNotes = trends.update(
+            balance: deepseekLive ? result.menuBarValues.deepseekOriginalBalance : nil,
+            disk: result.vps.flatMap { vps in
+                vps.diskUsedGB.map { (used: $0, free: vps.diskFreeGB, at: vps.cachedAt ?? now) }
+            },
+            now: now,
+            enabled: store.settings.usageAlerts
+        )
+        if let note = trendNotes.deepseek, let index = rows.firstIndex(where: { $0.id == "deepseek" }) {
+            rows[index].footnote = [rows[index].footnote, note].compactMap { $0 }.joined(separator: " · ")
+        }
+        lastDiskTrend = trendNotes.disk
 
         // Settings may have changed during the scrape; never overwrite a newer due date.
         advanceVPSIfNeededAndRefreshUI(repaint: false)
@@ -198,6 +240,8 @@ final class AppController: NSObject, NSPopoverDelegate {
             vpsConfigured: lastVPSConfigured,
             vpsNote: lastVPSNote,
             vpsSummary: VPSSummary.make(settings: store.settings, billing: lastBilling, fx: lastFX),
+            diskTrend: lastDiskTrend,
+            rowOrder: store.settings.effectiveMenuBarItems.compactMap(\.rowID),
             onRefresh: { [weak self] in self?.refresh(force: true, reloadOpenCode: true, live: true) },
             onSettings: { [weak self] in self?.showSettings() },
             onSignIn: { [weak self] in
@@ -205,14 +249,25 @@ final class AppController: NSObject, NSPopoverDelegate {
             },
             onQuit: { NSApp.terminate(nil) }
         )
-        let controller = NSHostingController(rootView: view)
-        popover.contentViewController = controller
+        // While open, update the existing view in place: rebuilding it on every
+        // refresh reset the scroll position and made the popover jump.
+        let controller: NSHostingController<PopoverView>
+        if let existing = popover.contentViewController as? NSHostingController<PopoverView> {
+            existing.rootView = view
+            controller = existing
+        } else {
+            controller = NSHostingController(rootView: view)
+            popover.contentViewController = controller
+        }
         controller.view.layoutSubtreeIfNeeded()
         let fitting = controller.view.fittingSize
-        popover.contentSize = NSSize(
+        let size = NSSize(
             width: max(448, fitting.width),
             height: max(360, min(560, fitting.height))
         )
+        if abs(popover.contentSize.width - size.width) > 1 || abs(popover.contentSize.height - size.height) > 1 {
+            popover.contentSize = size
+        }
     }
 
     func popoverDidClose(_ notification: Notification) {
@@ -246,8 +301,8 @@ final class AppController: NSObject, NSPopoverDelegate {
         lastFX = FX.make(settings: store.settings, rates: lastFX.rates)
         if let index = rows.firstIndex(where: { $0.id == "deepseek" }) {
             if rows[index].tag == .live, let original = menuBarValues.deepseekOriginalBalance {
-                rows[index].value = formatMoney(original)
-                rows[index].footnote = "balance"
+                // Shown in its own currency, so nothing to redo — and rewriting
+                // the row here would drop its pace/runway notes.
                 menuBarValues.deepseekBalance = original
             } else {
                 rows[index] = DeepSeekSource().manualRow(settings: store.settings, fx: lastFX, note: nil)

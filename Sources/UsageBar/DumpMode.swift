@@ -65,6 +65,10 @@ enum DumpMode {
             print(vpsStatsLine(result: result, settings: settings, now: Date()))
             print(fxLine(result: result))
             print(menuBarLine(result: result, settings: settings))
+            if let pace = result.opencodePace {
+                let usual = pace.usualPerHour.map { "$\(fmtDecimal($0, 2))/h" } ?? "learning"
+                print("Pace | OpenCode $\(fmtDecimal(pace.recentPerHour, 2))/h last 30 min | usual \(usual)")
+            }
         }
 
         exit(0)

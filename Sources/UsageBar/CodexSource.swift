@@ -3,6 +3,8 @@ import Foundation
 struct CodexReading {
     var fiveHourLeft: Int?
     var weekLeft: Int?
+    /// When the weekly window resets, when known.
+    var weekReset: Date? = nil
     /// Plan name derived from `rate_limits.plan_type`, e.g. "ChatGPT Plus"
     /// (SPEC §13 continued).
     var planName: String?
@@ -50,6 +52,7 @@ final class CodexSource: UsageSource {
         return CodexReading(
             fiveHourLeft: fiveLeft.map { Int($0.rounded()) },
             weekLeft: weekLeft.map { Int($0.rounded()) },
+            weekReset: snapshot.secondary?.resetsAt,
             planName: planName,
             row: UsageRow(
                 id: id,
@@ -153,6 +156,7 @@ final class CodexSource: UsageSource {
         return CodexReading(
             fiveHourLeft: fiveHourLeft,
             weekLeft: weekLeft,
+            weekReset: secondaryReset,
             planName: planName,
             row: UsageRow(
                 id: id,
