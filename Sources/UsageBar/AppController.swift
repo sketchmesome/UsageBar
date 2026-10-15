@@ -1,0 +1,314 @@
+import AppKit
+import SwiftUI
+
+final class AppController: NSObject, NSPopoverDelegate {
+    private let store = SettingsStore()
+    private let engine = UsageEngine()
+
+    private var statusItem: NSStatusItem!
+    private let popover = NSPopover()
+
+    private var settingsWindow: NSWindow?
+    private let loginController = OpenCodeLoginController()
+    private let launchAtLogin = LaunchAtLoginController()
+
+    private var timer: Timer?
+    private var timerMinutes: Int?
+    private var updatingDueDate = false
+    private var lastRefresh: Date?
+    private var rows: [UsageRow] = []
+    private var lastVPS: VPSStatus?
+    private var lastBilling: VPSBilling?
+    private var lastVPSConfigured = false
+    private var lastVPSNote: String?
+    /// FX context and live plan values from the last refresh (SPEC §13), reused
+    /// when settings change between refreshes.
+    private var lastFX = FX.make(settings: Settings(), rates: nil)
+    private var lastLive = LivePlanValues()
+
+    // Menu bar title state (SPEC §12): only reassign the button when the
+    // computed display actually changes.
+    private var menuBarValues = MenuBarValues()
+    private var lastMenuBarDisplay: MenuBarDisplay?
+    private var appliedLaunchAtLogin: Bool?
+
+    private let workQueue = DispatchQueue(label: "com.lanes.usagebar.refresh", qos: .utility)
+    private var refreshing = false
+    private var pendingOpenCodeRefresh = false
+
+    func start() {
+        statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
+        statusItem.button?.target = self
+        statusItem.button?.action = #selector(togglePopover(_:))
+        applyMenuBar()
+
+        popover.animates = false
+        popover.behavior = .transient
+        popover.delegate = self
+
+        store.onChange = { [weak self] in
+            guard let self, !self.updatingDueDate else { return }
+            self.scheduleTimer()
+            self.advanceVPSIfNeededAndRefreshUI()
+            self.syncLaunchAtLogin()
+            self.applyMenuBar()
+        }
+
+        // Refresh on wake.
+        NSWorkspace.shared.notificationCenter.addObserver(
+            self,
+            selector: #selector(systemDidWake),
+            name: NSWorkspace.didWakeNotification,
+            object: nil
+        )
+
+        workQueue.async { [weak self] in
+            let settings = SettingsStore.load() ?? Settings()
+            DispatchQueue.main.async {
+                guard let self else { return }
+                self.store.settings = settings
+                self.scheduleTimer()
+                self.refresh(force: true)
+            }
+        }
+    }
+
+    // MARK: - Timer
+
+    private func scheduleTimer() {
+        let minutes = store.settings.clampedRefreshMinutes
+        guard timerMinutes != minutes else { return }
+        timer?.invalidate()
+        timerMinutes = minutes
+        let interval = TimeInterval(minutes * 60)
+        let timer = Timer(timeInterval: interval, repeats: true) { [weak self] _ in
+            self?.refresh(force: true)
+        }
+        timer.tolerance = 120
+        RunLoop.main.add(timer, forMode: .common)
+        self.timer = timer
+    }
+
+    @objc private func systemDidWake() {
+        refresh(force: true)
+    }
+
+    // MARK: - Refresh
+
+    /// Debounced: skips when the last refresh finished less than 60 s ago
+    /// unless `force` is set. `reloadOpenCode` is only set by an explicit
+    /// popover "Refresh" click so the console webview obeys its own interval
+    /// otherwise (SPEC §10).
+    private func refresh(force: Bool, reloadOpenCode: Bool = false, live: Bool = false) {
+        if !force, let lastRefresh, Date().timeIntervalSince(lastRefresh) < 60 { return }
+        guard !refreshing else {
+            if reloadOpenCode { pendingOpenCodeRefresh = true }
+            return
+        }
+        refreshing = true
+
+        advanceVPSIfNeededAndRefreshUI(repaint: false)
+        let settings = store.settings
+        let now = Date()
+
+        workQueue.async { [weak self] in
+            guard let self else { return }
+            let result = self.engine.refresh(
+                settings: settings,
+                now: now,
+                forceOpenCode: reloadOpenCode,
+                forceLive: live
+            )
+            DispatchQueue.main.async {
+                self.refreshing = false
+                self.apply(result, now: now)
+                if self.pendingOpenCodeRefresh {
+                    self.pendingOpenCodeRefresh = false
+                    self.refresh(force: true, reloadOpenCode: true, live: true)
+                }
+            }
+        }
+    }
+
+    private func apply(_ result: RefreshResult, now: Date) {
+        rows = result.rows
+        lastRefresh = Date()
+        lastVPS = result.vps
+        lastBilling = result.billing
+        lastVPSConfigured = result.vpsConfigured
+        lastVPSNote = result.vpsNote
+        lastFX = result.fx
+        lastLive = result.live
+        menuBarValues = result.menuBarValues
+
+        // Settings may have changed during the scrape; never overwrite a newer due date.
+        advanceVPSIfNeededAndRefreshUI(repaint: false)
+        applyMenuBar()
+
+        if popover.isShown {
+            renderPopoverContent()
+        }
+    }
+
+    // MARK: - Popover
+
+    @objc private func togglePopover(_ sender: Any?) {
+        if popover.isShown {
+            popover.performClose(sender)
+        } else {
+            showPopover()
+        }
+    }
+
+    private func showPopover() {
+        guard let button = statusItem.button else { return }
+        renderPopoverContent()
+        popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
+        NSApp.activate(ignoringOtherApps: true)
+        refresh(force: false)
+    }
+
+    private func renderPopoverContent() {
+        let view = PopoverView(
+            rows: rows,
+            lastRefresh: lastRefresh,
+            now: Date(),
+            vps: lastVPS,
+            vpsConfigured: lastVPSConfigured,
+            vpsNote: lastVPSNote,
+            vpsSummary: VPSSummary.make(settings: store.settings, billing: lastBilling, fx: lastFX),
+            onRefresh: { [weak self] in self?.refresh(force: true, reloadOpenCode: true, live: true) },
+            onSettings: { [weak self] in self?.showSettings() },
+            onSignIn: { [weak self] in
+                self?.loginController.show(urlString: self?.store.settings.effectiveConsoleURL ?? Settings.defaultConsoleURL)
+            },
+            onQuit: { NSApp.terminate(nil) }
+        )
+        let controller = NSHostingController(rootView: view)
+        popover.contentViewController = controller
+        controller.view.layoutSubtreeIfNeeded()
+        let fitting = controller.view.fittingSize
+        popover.contentSize = NSSize(
+            width: max(448, fitting.width),
+            height: max(360, min(560, fitting.height))
+        )
+    }
+
+    func popoverDidClose(_ notification: Notification) {
+        // Destroy the hosted view so nothing renders while the popover is closed.
+        popover.contentViewController = nil
+    }
+
+    // MARK: - Settings window
+
+    private func showSettings() {
+        if let settingsWindow {
+            settingsWindow.makeKeyAndOrderFront(nil)
+            NSApp.activate(ignoringOtherApps: true)
+            return
+        }
+        let hosting = NSHostingController(rootView: SettingsView(store: store, launchAtLogin: launchAtLogin))
+        let window = NSWindow(contentViewController: hosting)
+        window.title = "UsageBar Settings"
+        window.styleMask = [.titled, .closable, .miniaturizable]
+        window.isReleasedWhenClosed = false
+        window.center()
+        settingsWindow = window
+        window.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+    }
+
+    // MARK: - VPS catch-up
+
+    /// Advances the stored due date on settings changes too, then repaints.
+    private func advanceVPSIfNeededAndRefreshUI(repaint: Bool = true) {
+        lastFX = FX.make(settings: store.settings, rates: lastFX.rates)
+        if let index = rows.firstIndex(where: { $0.id == "deepseek" }) {
+            if rows[index].tag == .live, let original = menuBarValues.deepseekOriginalBalance {
+                let display = lastFX.display(original)
+                rows[index].value = display.text
+                rows[index].footnote = ["balance", display.detail].compactMap { $0 }.joined(separator: " · ")
+                menuBarValues.deepseekBalance = display.money
+            } else {
+                rows[index] = DeepSeekSource().manualRow(settings: store.settings, fx: lastFX, note: nil)
+            }
+        }
+        let outcome = VPSDueSource().evaluate(
+            settings: store.settings,
+            now: Date(),
+            billing: lastBilling,
+            fx: lastFX
+        )
+        if let due = outcome.updatedDueDate, store.settings.vpsDueDate != due {
+            updatingDueDate = true
+            store.settings.vpsDueDate = due
+            updatingDueDate = false
+        }
+        menuBarValues.vpsDays = outcome.days
+        if let index = rows.firstIndex(where: { $0.id == "vps" }) { rows[index] = outcome.row }
+        if let index = rows.firstIndex(where: { $0.id == "spend" }) {
+            let spendOutcome = SpendSource().makeRow(
+                settings: store.settings,
+                fx: lastFX,
+                billing: lastBilling,
+                live: lastLive
+            )
+            rows[index] = spendOutcome.row
+            menuBarValues.totalSpend = spendOutcome.total
+        }
+        if repaint, popover.isShown { renderPopoverContent() }
+    }
+
+    // MARK: - Launch at login (SPEC §11)
+
+    /// Applies `settings.launchAtLogin` to `SMAppService.mainApp` when it
+    /// changed. Called at launch (via the first settings load) and on toggles.
+    private func syncLaunchAtLogin() {
+        let desired = store.settings.launchAtLogin
+        guard appliedLaunchAtLogin != desired else { return }
+        appliedLaunchAtLogin = desired
+        launchAtLogin.apply(enabled: desired)
+    }
+
+    // MARK: - Menu bar title (SPEC §12)
+
+    /// Recomputes the title/icon and only assigns to the button when the
+    /// presentation actually changed.
+    private func applyMenuBar() {
+        // Keep live readings, but resolve manual fallbacks from current settings
+        // even when an older refresh is still in flight.
+        var values = menuBarValues
+        if rows.first(where: { $0.id == "claude" })?.tag != .live {
+            values.claude5hLeft = store.settings.manualClaude5hLeft
+            values.claudeWeekLeft = store.settings.manualClaudeWeekLeft
+        }
+        if rows.first(where: { $0.id == "grok" })?.tag != .live {
+            values.grokPercentLeft = store.settings.manualGrokPercentLeft
+        }
+        if rows.first(where: { $0.id == "deepseek" })?.tag != .live {
+            values.deepseekBalance = store.settings.manualDeepseekBalance.map {
+                lastFX.convert(Money($0, "USD")) ?? Money($0, "USD")
+            }
+        }
+        let display = MenuBarTitle.display(settings: store.settings, values: values)
+        guard display != lastMenuBarDisplay else { return }
+
+        guard let button = statusItem.button else { return }
+        if display.showIcon != lastMenuBarDisplay?.showIcon {
+            button.image = display.showIcon ? MenuBarTitle.iconImage() : nil
+            button.imagePosition = display.showIcon ? .imageLeading : .noImage
+        }
+        // Assigning `title` clears any attributed title and vice versa, so the
+        // two paths stay mutually exclusive (SPEC §15).
+        if display.title != lastMenuBarDisplay?.title
+            || display.showLogos != lastMenuBarDisplay?.showLogos
+            || display.logoNames != lastMenuBarDisplay?.logoNames {
+            if display.showLogos {
+                button.attributedTitle = MenuBarTitle.attributedTitle(settings: store.settings, values: values)
+            } else {
+                button.title = display.title
+            }
+        }
+        lastMenuBarDisplay = display
+    }
+}
