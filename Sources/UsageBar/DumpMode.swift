@@ -1,3 +1,4 @@
+import UserNotifications
 import AppKit
 import Foundation
 
@@ -71,7 +72,37 @@ enum DumpMode {
             }
         }
 
+        print(notificationLine())
         exit(0)
+    }
+
+    /// Whether macOS will actually show UsageBar's alerts.
+    private static func notificationLine() -> String {
+        var status = "unknown"
+        var detail = ""
+        let done = DispatchSemaphore(value: 0)
+        UNUserNotificationCenter.current().getNotificationSettings { settings in
+            switch settings.authorizationStatus {
+            case .authorized: status = "allowed"
+            case .provisional: status = "provisional (delivered quietly)"
+            case .denied: status = "DENIED — turn on in System Settings → Notifications → UsageBar"
+            case .notDetermined: status = "not asked yet"
+            case .ephemeral: status = "ephemeral"
+            @unknown default: status = "unknown"
+            }
+            detail = "banners \(settings.alertSetting == .enabled ? "on" : "off") · sound \(settings.soundSetting == .enabled ? "on" : "off")"
+            done.signal()
+        }
+        _ = done.wait(timeout: .now() + 5)
+        var delivered: [String] = []
+        let listed = DispatchSemaphore(value: 0)
+        UNUserNotificationCenter.current().getDeliveredNotifications { notes in
+            delivered = notes.prefix(5).map { "\($0.request.content.title) (\(relativeAge($0.date, now: Date())))" }
+            listed.signal()
+        }
+        _ = listed.wait(timeout: .now() + 5)
+        let recent = delivered.isEmpty ? "none in Notification Center" : delivered.joined(separator: " · ")
+        return "Notifications | \(status) | \(detail) | \(recent)"
     }
 
     /// `TITLE | value | source tag | footnote`, with any settings secret

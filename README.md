@@ -9,10 +9,11 @@ A tiny macOS menu bar app that shows how much of your AI subscriptions you have 
 - **DeepSeek** — API balance
 - **Spend** — what you pay per month in total (in €, $ or £), plus a VPS renewal countdown
 
-It warns you before you run dry: a notification at 25%, 10% and 0% left, and a
+It warns you before you run dry: a notification at 25%, 10% and 0% left, a
+"Big drop" alert when a limit falls 15% or more within 15 minutes, and a
 "burning fast" alert when your current pace would empty a limit within the hour.
 Low numbers also turn orange/red in the menu bar. (Click **Allow** when macOS asks
-about notifications.)
+about notifications, and use **Send test alert** in Settings to check they get through.)
 
 It also tracks your **pace**, on one line under each row: how fast you're using
 it right now (%/h, from the 5-hour window) and your average burn this week

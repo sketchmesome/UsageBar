@@ -47,6 +47,9 @@ final class UsageAlerts {
         var minimumAlertRate: Double { isMoney ? 0.25 : 3 }
         /// Burn alerts need at least this drop.
         var minimumBurnDrop: Double { isMoney ? 0.25 : 5 }
+        /// A drop this big within `bigDropSpan` alerts at once, however short
+        /// the readings — a burst can land between two refreshes.
+        var bigDrop: Double { isMoney ? 1 : 15 }
     }
 
     /// When a source's value was actually observed, and whether it is stale.
@@ -65,6 +68,7 @@ final class UsageAlerts {
     private static let minimumBurnSpan: TimeInterval = 10 * 60
     private static let burnHorizonMinutes: Double = 60
     private static let burnCooldown: TimeInterval = 30 * 60
+    private static let bigDropSpan: TimeInterval = 15 * 60
 
     private static let basePaceSpan: TimeInterval = 30 * 60
     /// A flat run or an observation gap this long counts as a break.
@@ -105,6 +109,22 @@ final class UsageAlerts {
     private var historyChanged = false
     private static let historyURL = SettingsStore.directory.appendingPathComponent("pace-history.json")
     private var lastBurnAlert: [String: Date] = [:]
+
+    /// A sample notification from Settings, to check alerts get through
+    /// (permission, Focus, banner style).
+    static func sendTest(completion: ((Error?) -> Void)? = nil) {
+        let center = UNUserNotificationCenter.current()
+        center.requestAuthorization(options: [.alert, .sound]) { _, authError in
+            if let authError { completion?(authError) }
+            let content = UNMutableNotificationContent()
+            content.title = "UsageBar test alert"
+            content.body = "Alerts are working. If you didn't see a banner, check Focus and System Settings → Notifications → UsageBar."
+            content.sound = .default
+            center.add(UNNotificationRequest(identifier: "test-\(UUID().uuidString)", content: content, trigger: nil)) { error in
+                completion?(error)
+            }
+        }
+    }
 
     func requestPermission() {
         UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { _, _ in }
@@ -407,7 +427,20 @@ final class UsageAlerts {
         samples.removeAll { now.timeIntervalSince($0.at) > historySpan }
         history[window.key] = samples
 
-        guard announce, left > 0, let oldest = Self.activeStretch(samples, idleGap: idleGap).first else { return }
+        guard announce else { return }
+        if let start = samples.first(where: { observedAt.timeIntervalSince($0.at) <= Self.bigDropSpan }),
+           start.left - left >= window.bigDrop,
+           lastBurnAlert[window.key].map({ now.timeIntervalSince($0) >= Self.burnCooldown }) ?? true {
+            lastBurnAlert[window.key] = now
+            let minutes = max(1, Int((observedAt.timeIntervalSince(start.at) / 60).rounded()))
+            post(
+                id: "\(window.key)-drop",
+                title: "Big drop",
+                body: "\(window.name): down \(window.amount(start.left - left, decimals: 0)) in \(minutes) min — \(window.amount(left, decimals: 0)) left."
+            )
+            return
+        }
+        guard left > 0, let oldest = Self.activeStretch(samples, idleGap: idleGap).first else { return }
         let span = observedAt.timeIntervalSince(oldest.at)
         let drop = oldest.left - left
         guard span >= Self.minimumBurnSpan, drop >= window.minimumBurnDrop else { return }
@@ -429,6 +462,8 @@ final class UsageAlerts {
         content.body = body
         content.sound = .default
         let request = UNNotificationRequest(identifier: "\(id)-\(UUID().uuidString)", content: content, trigger: nil)
-        UNUserNotificationCenter.current().add(request)
+        UNUserNotificationCenter.current().add(request) { error in
+            if let error { NSLog("UsageBar: alert not delivered: %@", error.localizedDescription) }
+        }
     }
 }

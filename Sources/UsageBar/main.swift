@@ -5,6 +5,11 @@ import AppKit
 if CommandLine.arguments.contains("--dump") {
     DumpMode.run()
 }
+if CommandLine.arguments.contains("--test-alert") {
+    UsageAlerts.sendTest { error in print(error.map { "test alert failed: \($0)" } ?? "test alert posted") }
+    Thread.sleep(forTimeInterval: 3)
+    exit(0)
+}
 
 let app = NSApplication.shared
 let controller = AppController()

@@ -123,9 +123,11 @@ struct SettingsView: View {
 
             Section("Alerts") {
                 Toggle("Notify when usage runs low or burns fast", isOn: $store.settings.usageAlerts)
-                Text("At 25%, 10% and 0% left, and when the current pace would empty a window within the hour. Low numbers also turn orange/red in the menu bar.")
+                Text("At 25%, 10% and 0% left, on a sudden big drop (15% within 15 min), when the current pace would empty a window within the hour, and when you're going twice your usual speed. Low numbers also turn orange/red in the menu bar.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
+                Button("Send test alert") { UsageAlerts.sendTest() }
+                    .help("Shows a sample notification, to check macOS lets UsageBar's alerts through")
             }
 
             Section("Refresh") {
