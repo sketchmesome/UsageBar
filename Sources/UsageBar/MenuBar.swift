@@ -89,6 +89,21 @@ enum MenuBarItem: String, Codable, CaseIterable, Identifiable {
         }
     }
 
+    /// The "% left" behind a percentage item, for low-usage tinting. `nil` for
+    /// money/day items and for VPS disk (which is % used).
+    func percentLeft(_ values: MenuBarValues) -> Double? {
+        switch self {
+        case .claude5h: return values.claude5hLeft
+        case .claudeWeek: return values.claudeWeekLeft
+        case .codex5h: return values.codex5hLeft
+        case .codexWeek: return values.codexWeekLeft
+        case .opencode5h: return values.opencode5hLeft
+        case .opencodeWeek: return values.opencodeWeekLeft
+        case .grok: return values.grokPercentLeft
+        case .deepseek, .totalSpend, .vpsDays, .vpsDisk: return nil
+        }
+    }
+
     private func percent(_ value: Double?) -> String {
         guard let value, value.isFinite else { return "–" }
         return "\(fmtDecimal(value.rounded(), 0))%"
@@ -121,6 +136,9 @@ struct MenuBarDisplay: Equatable {
     /// Render the title with an inline 12pt logo per item (SPEC §15).
     var showLogos: Bool = false
     var logoNames: [String?] = []
+    /// Per-item tint band (see `MenuBarTitle.tint`), so crossing 25%/10% repaints
+    /// even when the rounded text doesn't change.
+    var tints: [Int] = []
 }
 
 enum MenuBarTitle {
@@ -141,28 +159,43 @@ enum MenuBarTitle {
         }
         return MenuBarDisplay(showIcon: mode.showsIcon, title: title,
                               showLogos: settings.menuBarShowLogos,
-                              logoNames: settings.menuBarShowLogos ? items.map { Logos.assetName(for: $0) } : [])
+                              logoNames: settings.menuBarShowLogos ? items.map { Logos.assetName(for: $0) } : [],
+                              tints: items.map { tint($0.percentLeft(values)) })
+    }
+
+    /// 0 = normal, 1 = orange (≤ 25% left), 2 = red (≤ 10% left).
+    static func tint(_ left: Double?) -> Int {
+        guard let left else { return 0 }
+        return left <= 10 ? 2 : (left <= 25 ? 1 : 0)
     }
 
     /// Attributed title with a 12pt service logo in front of each item
     /// (SPEC §15). Items without a logo (e.g. total spend) stay text-only.
-    static func attributedTitle(settings: Settings, values: MenuBarValues) -> NSAttributedString {
+    /// Low values are tinted: orange at 25% left or less, red at 10% or less.
+    static func attributedTitle(settings: Settings, values: MenuBarValues, logos: Bool = true) -> NSAttributedString {
         let labelled = settings.effectiveMenuBarLabelled
         let separator = labelled ? " · " : " "
+        let font = NSFont.menuBarFont(ofSize: 0)
         let result = NSMutableAttributedString()
         for (index, item) in settings.effectiveMenuBarItems.enumerated() {
-            if index > 0 { result.append(NSAttributedString(string: separator)) }
-            if let name = Logos.assetName(for: item),
+            if index > 0 { result.append(NSAttributedString(string: separator, attributes: [.font: font])) }
+            if logos, let name = Logos.assetName(for: item),
                let image = Logos.image(named: name)
                 ?? NSImage(systemSymbolName: Logos.fallbackSymbol, accessibilityDescription: item.title) {
                 let attachment = NSTextAttachment()
                 attachment.image = image
                 attachment.bounds = CGRect(x: 0, y: -2, width: 12, height: 12)
                 result.append(NSAttributedString(attachment: attachment))
-                result.append(NSAttributedString(string: " "))
+                result.append(NSAttributedString(string: " ", attributes: [.font: font]))
             }
             let text = labelled ? "\(item.label) \(item.value(values))" : item.value(values)
-            result.append(NSAttributedString(string: text))
+            var attributes: [NSAttributedString.Key: Any] = [.font: font]
+            switch tint(item.percentLeft(values)) {
+            case 2: attributes[.foregroundColor] = NSColor.systemRed
+            case 1: attributes[.foregroundColor] = NSColor.systemOrange
+            default: break
+            }
+            result.append(NSAttributedString(string: text, attributes: attributes))
         }
         return result
     }

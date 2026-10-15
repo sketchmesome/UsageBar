@@ -151,7 +151,7 @@ final class UsageEngine {
             opencode5hLeft: opencodeReading?.reused == true ? nil : opencodeReading?.fiveHourLeft,
             opencodeWeekLeft: opencodeReading?.reused == true ? nil : opencodeReading?.weekLeft,
             grokPercentLeft: grokReading?.percentLeft,
-            deepseekBalance: deepseekBalance.flatMap { fx.convert($0) ?? $0 },
+            deepseekBalance: deepseekBalance,
             deepseekOriginalBalance: deepseekBalance,
             totalSpend: spendOutcome.total,
             vpsDays: due.days,

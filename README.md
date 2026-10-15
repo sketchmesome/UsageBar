@@ -9,7 +9,14 @@ A tiny macOS menu bar app that shows how much of your AI subscriptions you have 
 - **DeepSeek** — API balance
 - **Spend** — what you pay per month in total (in €, $ or £), plus a VPS renewal countdown
 
-It uses almost no CPU (refreshes every 10 minutes), stores everything locally in
+It warns you before you run dry: a notification at 25%, 10% and 0% left, and a
+"burning fast" alert when your current pace would empty a limit within the hour.
+Low numbers also turn orange/red in the menu bar. (Click **Allow** when macOS asks
+about notifications.)
+
+Checking your usage never uses up your usage — it only reads it.
+
+It uses almost no CPU (refreshes every 10 minutes by default, down to every 2), stores everything locally in
 `~/Library/Application Support/UsageBar/`, and sends nothing anywhere except the
 services' own usage pages.
 
@@ -56,7 +63,7 @@ and can be ignored.
 | **Grok Bot** | Nothing, if the Grok Bot Mac app is installed. Otherwise type your % left manually. |
 | **OpenCode Go** | Go to [opencode.ai/console](https://opencode.ai/console), open your Go page and copy its address (looks like `https://opencode.ai/console/org_…/go`). Paste it into **Console URL**, then click **Sign in to OpenCode…** in the menu and log in once. |
 | **DeepSeek** | Endpoint URL: `https://api.deepseek.com/user/balance` — Token: your DeepSeek API key. |
-| **Prices** | Type what you pay per month for each plan, so the Spend row adds them up. Leave blank anything you don't have. |
+| **Prices** | Type what you pay per month for each plan, exactly as on the receipt, and pick that receipt's currency next to it. The Spend row adds them up in your display currency. Leave blank anything you don't have. |
 | **VPS** | Optional: price and next due date, for the renewal countdown. |
 
 Also in Settings: which numbers appear in the menu bar, display currency, and

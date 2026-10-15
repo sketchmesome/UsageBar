@@ -4,15 +4,48 @@ struct SettingsView: View {
     @ObservedObject var store: SettingsStore
     @ObservedObject var launchAtLogin: LaunchAtLoginController
 
+    /// Per-price currency picker; "Default" follows the global price currency.
+    private func priceCurrencyPicker(_ name: String) -> some View {
+        Picker("", selection: Binding(
+            get: { store.settings.priceCurrencies[name] ?? "" },
+            set: { store.settings.priceCurrencies[name] = $0.isEmpty ? nil : $0 }
+        )) {
+            Text("Default").tag("")
+            ForEach(Settings.supportedCurrencies, id: \.self) { code in
+                Text(code).tag(code)
+            }
+        }
+        .labelsHidden()
+        .frame(width: 90)
+    }
+
     var body: some View {
         Form {
             Section("Monthly prices") {
-                OptionalDoubleField(title: "Claude", value: $store.settings.priceClaude)
-                OptionalDoubleField(title: "ChatGPT", value: $store.settings.priceChatGPT)
-                OptionalDoubleField(title: "OpenCode", value: $store.settings.priceOpenCode)
-                OptionalDoubleField(title: "Grok Bot", value: $store.settings.priceGrokBot)
-                OptionalDoubleField(title: "VPS", value: $store.settings.priceVPS)
-                OptionalDoubleField(title: "Other", value: $store.settings.priceOther)
+                HStack {
+                    OptionalDoubleField(title: "Claude", value: $store.settings.priceClaude)
+                    priceCurrencyPicker("Claude")
+                }
+                HStack {
+                    OptionalDoubleField(title: "ChatGPT", value: $store.settings.priceChatGPT)
+                    priceCurrencyPicker("ChatGPT")
+                }
+                HStack {
+                    OptionalDoubleField(title: "OpenCode", value: $store.settings.priceOpenCode)
+                    priceCurrencyPicker("OpenCode")
+                }
+                HStack {
+                    OptionalDoubleField(title: "Grok Bot", value: $store.settings.priceGrokBot)
+                    priceCurrencyPicker("Grok Bot")
+                }
+                HStack {
+                    OptionalDoubleField(title: "VPS", value: $store.settings.priceVPS)
+                    priceCurrencyPicker("VPS")
+                }
+                HStack {
+                    OptionalDoubleField(title: "Other", value: $store.settings.priceOther)
+                    priceCurrencyPicker("Other")
+                }
             }
 
             Section("VPS billing") {
@@ -52,8 +85,8 @@ struct SettingsView: View {
                     Stepper(
                         "\(store.settings.clampedOpenCodeRefreshMinutes) min",
                         value: $store.settings.opencodeRefreshMinutes,
-                        in: 15...240,
-                        step: 15
+                        in: 5...240,
+                        step: 5
                     )
                 }
             }
@@ -88,6 +121,13 @@ struct SettingsView: View {
                     .foregroundStyle(.secondary)
             }
 
+            Section("Alerts") {
+                Toggle("Notify when usage runs low or burns fast", isOn: $store.settings.usageAlerts)
+                Text("At 25%, 10% and 0% left, and when the current pace would empty a window within the hour. Low numbers also turn orange/red in the menu bar.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
             Section("Refresh") {
                 HStack {
                     Text("Interval")
@@ -95,7 +135,7 @@ struct SettingsView: View {
                     Stepper(
                         "\(store.settings.clampedRefreshMinutes) min",
                         value: $store.settings.refreshIntervalMinutes,
-                        in: 5...30
+                        in: 2...30
                     )
                 }
             }

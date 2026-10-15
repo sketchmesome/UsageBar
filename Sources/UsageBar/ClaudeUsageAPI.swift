@@ -48,7 +48,8 @@ enum ClaudeUsageAPI {
     private static var rateLimitedUntil: Date?
 
     /// Between requests; also the window in which a snapshot may be reused.
-    private static let minimumInterval: TimeInterval = 600
+    /// Just under the shortest refresh interval (2 min), so every tick may ask.
+    private static let minimumInterval: TimeInterval = 100
     /// A cached snapshot older than this is not shown as live at all — better to
     /// fall back to a local source than to label stale numbers LIVE.
     private static let maxCacheAge: TimeInterval = 1200

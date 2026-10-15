@@ -22,7 +22,7 @@ final class OpenCodeLoginController: NSObject, NSWindowDelegate {
             backing: .buffered,
             defer: false
         )
-        window.title = "Sign in to OpenCode"
+        window.title = "OpenCode console"
         window.center()
         window.delegate = self
         window.isReleasedWhenClosed = false

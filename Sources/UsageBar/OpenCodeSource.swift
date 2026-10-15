@@ -40,6 +40,23 @@ final class OpenCodeSource: UsageSource {
     /// crude estimate.
     private var lastGood: (payload: ScrapePayload, at: Date, url: String)?
 
+    /// Local-database spend recorded at each console load, so later refreshes
+    /// can add what was spent since (see `liveAdjusted`). Guarded by cacheLock.
+    private var cachedSpend: OpenCodeSpend?
+    private var goodSpend: OpenCodeSpend?
+
+    /// New Go spend since the last console load that triggers an early reload
+    /// instead of waiting out the OpenCode interval.
+    private static let reloadSpendJumpUSD = 0.5
+    /// …but never more often than this.
+    private static let minimumReloadGap: TimeInterval = 300
+
+    /// When the last console load failed outright (offline, timeout). Further
+    /// automatic loads wait `failureBackoff` so a dead network doesn't spin up
+    /// a webview every tick; an explicit Refresh still loads. Guarded by cacheLock.
+    private var lastFailure: Date?
+    private static let failureBackoff: TimeInterval = 600
+
     /// Most recent LIVE monthly dollar cap seen on the console page, used when
     /// the estimate fallback needs a cap (SPEC §13 continued).
     private let capLock = NSLock()
@@ -56,11 +73,26 @@ final class OpenCodeSource: UsageSource {
     func reading(settings: Settings, now: Date, forceReload: Bool, fx: FX) -> OpenCodeReading {
         let interval = TimeInterval(settings.clampedOpenCodeRefreshMinutes * 60)
         let urlString = settings.effectiveConsoleURL
-        if !forceReload, let cached = currentCache(), cached.url == urlString,
-           now.timeIntervalSince(cached.at) < interval {
+        // One database snapshot per refresh, shared by the early-reload check
+        // and the live adjustment.
+        let cachedLoad = currentCache().flatMap { $0.url == urlString ? $0 : nil }
+        let snapshot = cachedLoad.flatMap { OpenCodeDatabase.snapshot(now: now, since: $0.at) }
+
+        if !forceReload, let failed = currentFailure(), now.timeIntervalSince(failed) < Self.failureBackoff {
+            return reusedReading(
+                settings: settings, fx: fx, now: now, interval: interval,
+                note: "console unreachable, retrying later", debug: nil
+            )
+        }
+
+        if !forceReload, let cached = cachedLoad,
+           now.timeIntervalSince(cached.at) < interval,
+           !spendJumped(since: cached.at, now: now, snapshot: snapshot) {
             let parsed = OpenCodeParser.parse(payload: cached.payload, cap: settings.effectiveMonthlyCap)
             if parsed.hasAny || parsed.needsSignIn || parsed.hasPlanValues {
-                return reading(from: cached.payload, settings: settings, fx: fx, stamp: cached.at, now: now)
+                let reading = reading(from: cached.payload, settings: settings, fx: fx, stamp: cached.at, now: now)
+                return liveAdjusted(reading, base: currentSpend(at: cached.at), snapshot: snapshot,
+                                    stamp: cached.at, now: now, settings: settings)
             }
             // The cached load carried nothing usable; prefer the last good one.
             return reusedReading(
@@ -75,6 +107,7 @@ final class OpenCodeSource: UsageSource {
 
         switch scrape(url: url) {
         case .success(let payload):
+            setFailure(nil)
             // Cache every successful load so the interval gate holds even when
             // the page carries nothing we can parse.
             store(payload, at: now, url: urlString)
@@ -88,6 +121,7 @@ final class OpenCodeSource: UsageSource {
                 note: "page unparsed", debug: parsed.debug
             )
         case .failure(let error):
+            setFailure(now)
             return reusedReading(
                 settings: settings, fx: fx, now: now, interval: interval,
                 note: error.localizedDescription,
@@ -104,7 +138,12 @@ final class OpenCodeSource: UsageSource {
                                note: String, debug: String?) -> OpenCodeReading {
         if let good = currentGood(), good.url == settings.effectiveConsoleURL,
            now.timeIntervalSince(good.at) <= max(3 * interval, 3600) {
-            var reading = reading(from: good.payload, settings: settings, fx: fx, stamp: good.at, now: now)
+            var reading = liveAdjusted(
+                reading(from: good.payload, settings: settings, fx: fx, stamp: good.at, now: now),
+                base: currentSpend(at: good.at),
+                snapshot: OpenCodeDatabase.snapshot(now: now, since: good.at),
+                stamp: good.at, now: now, settings: settings
+            )
             reading.reused = true
             let suffix = "last good load \(relativeAge(good.at, now: now)), refresh failed"
             let existing = reading.row.footnote?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
@@ -129,15 +168,107 @@ final class OpenCodeSource: UsageSource {
     }
 
     private func store(_ payload: ScrapePayload, at date: Date, url: String) {
+        let spend = OpenCodeDatabase.readSpend(now: date)
         cacheLock.lock()
         cached = (payload, date, url)
+        cachedSpend = spend
         cacheLock.unlock()
     }
 
     private func storeGood(_ payload: ScrapePayload, at date: Date, url: String) {
         cacheLock.lock()
         lastGood = (payload, date, url)
+        goodSpend = cachedSpend
         cacheLock.unlock()
+    }
+
+    private func currentFailure() -> Date? {
+        cacheLock.lock()
+        defer { cacheLock.unlock() }
+        return lastFailure
+    }
+
+    private func setFailure(_ date: Date?) {
+        cacheLock.lock()
+        lastFailure = date
+        cacheLock.unlock()
+    }
+
+    /// Database spend recorded with the load stamped `date`, if any.
+    private func currentSpend(at date: Date) -> OpenCodeSpend? {
+        cacheLock.lock()
+        defer { cacheLock.unlock() }
+        if let cached, cached.at == date { return cachedSpend }
+        if let lastGood, lastGood.at == date { return goodSpend }
+        return nil
+    }
+
+    /// True when enough new Go spend has landed since the load at `since` that
+    /// the console should be re-read now rather than at the next interval.
+    /// Uses spend recorded after the load (not the net change of a rolling
+    /// window), so older spend ageing out can't hide new use.
+    private func spendJumped(since: Date, now: Date, snapshot: OpenCodeDBSnapshot?) -> Bool {
+        guard now.timeIntervalSince(since) >= Self.minimumReloadGap, let snapshot else { return false }
+        return snapshot.spentSince >= Self.reloadSpendJumpUSD || snapshot.limitHit
+    }
+
+    /// Brings a console reading up to date with what the local OpenCode
+    /// database has recorded since that load: the console's used % plus the
+    /// new Go spend measured against the window's dollar cap (from the page,
+    /// else implied by the console % and the spend at load time, else the
+    /// settings cap share). Both database sums are rolling windows, so spend
+    /// ageing out of the window is subtracted too. A Go "usage limit exceeded"
+    /// error since the load pins the 5h window to 0.
+    private func liveAdjusted(_ reading: OpenCodeReading, base: OpenCodeSpend?, snapshot: OpenCodeDBSnapshot?,
+                              stamp: Date, now: Date, settings: Settings) -> OpenCodeReading {
+        guard reading.row.tag == .live, reading.fiveHourLeft != nil || reading.weekLeft != nil,
+              now.timeIntervalSince(stamp) >= 60,
+              let base, let snapshot else { return reading }
+        let current = snapshot.spend
+
+        // The manual cap override (SPEC §13) wins over console caps here too.
+        let override = settings.opencodeOverride
+        let fallbackCap = settings.effectiveMonthlyCap
+        func estimate(_ left: Double?, cap: Double?, then: Double, now: Double, share: Double) -> Double? {
+            guard let left else { return nil }
+            let used = 100 - left
+            let capUSD = override
+                ? fallbackCap * share
+                : (cap ?? (used >= 2 && then >= 0.05 ? then / (used / 100) : fallbackCap * share))
+            guard capUSD > 0 else { return left }
+            return leftPercent(used + (now - then) / capUSD * 100)
+        }
+
+        var out = reading
+        out.fiveHourLeft = estimate(reading.fiveHourLeft, cap: reading.capFiveHourUSD,
+                                    then: base.fiveHour, now: current.fiveHour, share: 0.20)
+        out.weekLeft = estimate(reading.weekLeft, cap: reading.capWeekUSD,
+                                then: base.week, now: current.week, share: 0.50)
+        let limitHit = snapshot.limitHit
+        if limitHit { out.fiveHourLeft = 0 }
+
+        let changed = abs(current.fiveHour - base.fiveHour) >= 0.005 || abs(current.week - base.week) >= 0.005
+        guard limitHit || changed else { return reading }
+
+        var parts: [String] = []
+        if let five = out.fiveHourLeft { parts.append("5h: \(Int(five.rounded()))% left") }
+        if let week = out.weekLeft { parts.append("Week: \(Int(week.rounded()))% left") }
+        let note = limitHit
+            ? "Go limit hit (OpenCode error)"
+            : "est: $\(String(format: "%.2f", snapshot.spentSince)) spent since console check \(relativeAge(stamp, now: now))"
+        let footnote = [reading.row.footnote, note].compactMap { $0 }.joined(separator: " · ")
+        out.row = UsageRow(
+            id: reading.row.id,
+            title: reading.row.title,
+            value: parts.joined(separator: " · "),
+            footnote: footnote,
+            tag: .estimated,
+            updated: now,
+            debug: reading.row.debug,
+            alert: limitHit,
+            staleAfter: reading.row.staleAfter
+        )
+        return out
     }
 
     private func storeLiveCap(_ cap: Double) {

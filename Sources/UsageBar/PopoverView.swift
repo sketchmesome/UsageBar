@@ -18,6 +18,10 @@ struct PopoverView: View {
     private var mainRows: [UsageRow] { rows.filter { $0.id != "vps" } }
     private var vpsRow: UsageRow? { rows.first { $0.id == "vps" } }
 
+    private var openCodeNeedsSignIn: Bool {
+        rows.first { $0.id == "opencode" }?.value == "needs sign-in"
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack(spacing: 8) {
@@ -50,7 +54,9 @@ struct PopoverView: View {
                 Button("Refresh", action: onRefresh)
                 Button("Settings…", action: onSettings)
                 Spacer()
-                Button("Sign in to OpenCode…", action: onSignIn)
+                // Only ask to sign in when the console actually said so; otherwise
+                // the same window just opens the console page.
+                Button(openCodeNeedsSignIn ? "Sign in to OpenCode…" : "Open OpenCode console…", action: onSignIn)
                 Button("Quit", action: onQuit)
             }
         }

@@ -107,7 +107,7 @@ struct VPSPrice {
 extension VPSBilling {
     static func resolvePrice(settings: Settings, billing: VPSBilling?) -> VPSPrice? {
         if let manual = settings.priceVPS {
-            let money = Money(manual, settings.effectivePriceCurrency)
+            let money = Money(manual, settings.priceCurrency(for: "VPS"))
             return VPSPrice(monthly: money, originalText: "\(formatMoney(money))/mo", tag: .manual)
         }
         guard let billing else { return nil }

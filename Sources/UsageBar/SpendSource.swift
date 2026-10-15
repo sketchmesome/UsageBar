@@ -49,6 +49,7 @@ struct SpendSource {
             planLine(
                 name: "Claude",
                 manual: settings.priceClaude,
+                currency: settings.priceCurrency(for: "Claude"),
                 list: PlanPrices.claude(live.claudePlanName),
                 fx: fx,
                 note: PlanPrices.usListNote
@@ -56,6 +57,7 @@ struct SpendSource {
             planLine(
                 name: "ChatGPT",
                 manual: settings.priceChatGPT,
+                currency: settings.priceCurrency(for: "ChatGPT"),
                 list: PlanPrices.codex(live.codexPlanName),
                 fx: fx,
                 note: PlanPrices.usListNote
@@ -64,6 +66,7 @@ struct SpendSource {
             planLine(
                 name: "Grok Bot",
                 manual: settings.priceGrokBot,
+                currency: settings.priceCurrency(for: "Grok Bot"),
                 list: PlanPrices.grok(live.grokPlanName),
                 fx: fx,
                 note: nil
@@ -81,7 +84,7 @@ struct SpendSource {
             lines.append(Line(name: "VPS", money: nil, text: nil, tag: .manual))
         }
 
-        lines.append(planLine(name: "Other", manual: settings.priceOther, list: nil, fx: fx, note: nil))
+        lines.append(planLine(name: "Other", manual: settings.priceOther, currency: settings.priceCurrency(for: "Other"), list: nil, fx: fx, note: nil))
 
         var total = 0.0
         var leftoverAmounts: [String: Double] = [:]
@@ -149,12 +152,13 @@ struct SpendSource {
     private func planLine(
         name: String,
         manual: Double?,
+        currency: String,
         list: PlanListPrice?,
         fx: FX,
         note: String?
     ) -> Line {
         if let manual {
-            return Line(name: name, money: Money(manual, fx.priceCurrency), text: nil, tag: .manual)
+            return Line(name: name, money: Money(manual, currency), text: nil, tag: .manual)
         }
         if let list {
             return Line(
@@ -173,7 +177,7 @@ struct SpendSource {
     /// console price → official list price (Go → USD 10) → not set.
     private func openCodeLine(settings: Settings, fx: FX, live: LivePlanValues) -> Line {
         if let manual = settings.priceOpenCode {
-            return Line(name: "OpenCode", money: Money(manual, fx.priceCurrency), text: nil, tag: .manual)
+            return Line(name: "OpenCode", money: Money(manual, settings.priceCurrency(for: "OpenCode")), text: nil, tag: .manual)
         }
         if let livePrice = live.opencodeMonthlyPriceUSD {
             return Line(name: "OpenCode", money: Money(livePrice, "USD"), text: nil, tag: .live)

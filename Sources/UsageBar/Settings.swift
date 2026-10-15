@@ -44,6 +44,9 @@ struct Settings: Codable {
     // Launch at login (SPEC §11).
     var launchAtLogin: Bool = true
 
+    /// Notify when a usage window runs low or is burning fast.
+    var usageAlerts: Bool = true
+
     // Menu bar display (SPEC §12).
     var menuBarMode: MenuBarMode = .iconAndItems
     var menuBarItems: [MenuBarItem] = [.claude5h, .codex5h]
@@ -58,6 +61,10 @@ struct Settings: Codable {
     // `displayCurrency`; entered prices start in `priceCurrency`.
     var displayCurrency: String = "EUR"
     var priceCurrency: String = "USD"
+    /// Per-price currency, keyed by spend line name ("Claude", "Grok Bot", …),
+    /// so each price can be entered exactly as on its receipt. Missing keys
+    /// fall back to `priceCurrency`.
+    var priceCurrencies: [String: String] = [:]
     /// Manual rates keyed "USD->EUR", "GBP->EUR", … (blank = auto).
     var fxOverrides: [String: Double] = [:]
     /// When true, the manual OpenCode cap wins over live console values.
@@ -74,11 +81,11 @@ struct Settings: Codable {
     }
 
     var clampedRefreshMinutes: Int {
-        min(30, max(5, refreshIntervalMinutes))
+        min(30, max(2, refreshIntervalMinutes))
     }
 
     var clampedOpenCodeRefreshMinutes: Int {
-        min(240, max(15, opencodeRefreshMinutes))
+        min(240, max(5, opencodeRefreshMinutes))
     }
 
     /// Display currency, validated against the offered set (default EUR).
@@ -91,6 +98,12 @@ struct Settings: Codable {
     var effectivePriceCurrency: String {
         let code = priceCurrency.trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
         return Settings.supportedCurrencies.contains(code) ? code : "USD"
+    }
+
+    /// Currency the named entered price is in, validated.
+    func priceCurrency(for name: String) -> String {
+        let code = (priceCurrencies[name] ?? "").trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
+        return Settings.supportedCurrencies.contains(code) ? code : effectivePriceCurrency
     }
 
     var effectiveMonthlyCap: Double {
@@ -132,9 +145,9 @@ struct Settings: Codable {
         case deepseekEndpointURL, deepseekToken
         case opencodeConsoleURL, opencodeMonthlyCap, opencodeRefreshMinutes
         case refreshIntervalMinutes
-        case launchAtLogin, menuBarMode, menuBarItems, menuBarLabelled, menuBarShowLogos
+        case launchAtLogin, usageAlerts, menuBarMode, menuBarItems, menuBarLabelled, menuBarShowLogos
         case menuBarCustomized
-        case displayCurrency, priceCurrency, fxOverrides, opencodeOverride
+        case displayCurrency, priceCurrency, priceCurrencies, fxOverrides, opencodeOverride
     }
 
     init(from decoder: Decoder) throws {
@@ -164,6 +177,8 @@ struct Settings: Codable {
         refreshIntervalMinutes = c.decodeOr(Int.self, .refreshIntervalMinutes, 10)
 
         launchAtLogin = c.decodeOr(Bool.self, .launchAtLogin, true)
+
+        usageAlerts = c.decodeOr(Bool.self, .usageAlerts, true)
         menuBarMode = c.decodeOr(MenuBarMode.self, .menuBarMode, .iconAndItems)
         menuBarItems = c.decodeOr([MenuBarItem].self, .menuBarItems, [.claude5h, .codex5h])
         menuBarLabelled = c.decodeOr(Bool.self, .menuBarLabelled, false)
@@ -172,6 +187,7 @@ struct Settings: Codable {
 
         displayCurrency = c.decodeOr(String.self, .displayCurrency, "EUR")
         priceCurrency = c.decodeOr(String.self, .priceCurrency, "USD")
+        priceCurrencies = c.decodeOr([String: String].self, .priceCurrencies, [:])
         fxOverrides = c.decodeOr([String: Double].self, .fxOverrides, [:])
         opencodeOverride = c.decodeOr(Bool.self, .opencodeOverride, false)
     }

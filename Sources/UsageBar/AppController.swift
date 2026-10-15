@@ -11,6 +11,7 @@ final class AppController: NSObject, NSPopoverDelegate {
     private var settingsWindow: NSWindow?
     private let loginController = OpenCodeLoginController()
     private let launchAtLogin = LaunchAtLoginController()
+    private let alerts = UsageAlerts()
 
     private var timer: Timer?
     private var timerMinutes: Int?
@@ -52,6 +53,7 @@ final class AppController: NSObject, NSPopoverDelegate {
             self.advanceVPSIfNeededAndRefreshUI()
             self.syncLaunchAtLogin()
             self.applyMenuBar()
+            self.requestAlertPermissionIfNeeded()
         }
 
         // Refresh on wake.
@@ -67,6 +69,7 @@ final class AppController: NSObject, NSPopoverDelegate {
             DispatchQueue.main.async {
                 guard let self else { return }
                 self.store.settings = settings
+                self.requestAlertPermissionIfNeeded()
                 self.scheduleTimer()
                 self.refresh(force: true)
             }
@@ -84,9 +87,17 @@ final class AppController: NSObject, NSPopoverDelegate {
         let timer = Timer(timeInterval: interval, repeats: true) { [weak self] _ in
             self?.refresh(force: true)
         }
-        timer.tolerance = 120
+        timer.tolerance = min(120, interval * 0.1)
         RunLoop.main.add(timer, forMode: .common)
         self.timer = timer
+    }
+
+    /// Asks for notification permission once, and only while alerts are on.
+    private var requestedAlertPermission = false
+    private func requestAlertPermissionIfNeeded() {
+        guard store.settings.usageAlerts, !requestedAlertPermission else { return }
+        requestedAlertPermission = true
+        alerts.requestPermission()
     }
 
     @objc private func systemDidWake() {
@@ -140,6 +151,16 @@ final class AppController: NSObject, NSPopoverDelegate {
         lastFX = result.fx
         lastLive = result.live
         menuBarValues = result.menuBarValues
+        var observations: [String: UsageAlerts.Observation] = [:]
+        for row in result.rows {
+            observations[row.id] = UsageAlerts.Observation(
+                at: row.updated,
+                stale: row.isStale(now: now),
+                measured: row.tag == .live || row.tag == .estimated
+            )
+        }
+        alerts.evaluate(values: result.menuBarValues, observations: observations,
+                        now: now, enabled: store.settings.usageAlerts)
 
         // Settings may have changed during the scrape; never overwrite a newer due date.
         advanceVPSIfNeededAndRefreshUI(repaint: false)
@@ -225,10 +246,9 @@ final class AppController: NSObject, NSPopoverDelegate {
         lastFX = FX.make(settings: store.settings, rates: lastFX.rates)
         if let index = rows.firstIndex(where: { $0.id == "deepseek" }) {
             if rows[index].tag == .live, let original = menuBarValues.deepseekOriginalBalance {
-                let display = lastFX.display(original)
-                rows[index].value = display.text
-                rows[index].footnote = ["balance", display.detail].compactMap { $0 }.joined(separator: " · ")
-                menuBarValues.deepseekBalance = display.money
+                rows[index].value = formatMoney(original)
+                rows[index].footnote = "balance"
+                menuBarValues.deepseekBalance = original
             } else {
                 rows[index] = DeepSeekSource().manualRow(settings: store.settings, fx: lastFX, note: nil)
             }
@@ -286,9 +306,7 @@ final class AppController: NSObject, NSPopoverDelegate {
             values.grokPercentLeft = store.settings.manualGrokPercentLeft
         }
         if rows.first(where: { $0.id == "deepseek" })?.tag != .live {
-            values.deepseekBalance = store.settings.manualDeepseekBalance.map {
-                lastFX.convert(Money($0, "USD")) ?? Money($0, "USD")
-            }
+            values.deepseekBalance = store.settings.manualDeepseekBalance.map { Money($0, "USD") }
         }
         let display = MenuBarTitle.display(settings: store.settings, values: values)
         guard display != lastMenuBarDisplay else { return }
@@ -302,12 +320,13 @@ final class AppController: NSObject, NSPopoverDelegate {
         // two paths stay mutually exclusive (SPEC §15).
         if display.title != lastMenuBarDisplay?.title
             || display.showLogos != lastMenuBarDisplay?.showLogos
-            || display.logoNames != lastMenuBarDisplay?.logoNames {
-            if display.showLogos {
-                button.attributedTitle = MenuBarTitle.attributedTitle(settings: store.settings, values: values)
-            } else {
-                button.title = display.title
-            }
+            || display.logoNames != lastMenuBarDisplay?.logoNames
+            || display.tints != lastMenuBarDisplay?.tints {
+            // Always attributed, so low values can be tinted (logos optional);
+            // empty when the mode hides the items.
+            button.attributedTitle = display.title.isEmpty
+                ? NSAttributedString(string: "")
+                : MenuBarTitle.attributedTitle(settings: store.settings, values: values, logos: display.showLogos)
         }
         lastMenuBarDisplay = display
     }

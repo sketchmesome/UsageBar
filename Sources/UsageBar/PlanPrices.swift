@@ -132,10 +132,10 @@ enum PlanPrices {
     // MARK: - OpenCode  (console plan)
     // verified 2026-10-14 // https://opencode.ai/go
     //   Go → USD 10; the live console price wins whenever it is parsed.
-    //   When the page did not identify a plan at all, Go is the default.
+    //   No plan identified → nil, so a Mac without an OpenCode subscription
+    //   never gets a price added to its spend.
 
     static func opencode(_ planName: String?) -> PlanListPrice? {
-        if planName == nil { return goEntry }
         guard let key = normalized(planName, stripping: "opencode") else { return nil }
         return key == "go" ? goEntry : nil
     }

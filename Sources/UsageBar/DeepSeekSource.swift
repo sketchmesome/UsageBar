@@ -72,14 +72,14 @@ final class DeepSeekSource: UsageSource {
         }
     }
 
-    /// The live balance row shown on success, in the display currency.
+    /// The live balance row shown on success. A prepaid top-up balance, so it
+    /// stays in the currency it was topped up in rather than the display currency.
     func balanceRow(_ balance: Money, fx: FX, now: Date) -> UsageRow {
-        let display = fx.display(balance)
-        return UsageRow(
+        UsageRow(
             id: id,
             title: "DeepSeek API",
-            value: display.text,
-            footnote: ["balance", display.detail].compactMap { $0 }.joined(separator: " · "),
+            value: formatMoney(balance),
+            footnote: "balance",
             tag: .live,
             updated: now
         )
@@ -88,12 +88,12 @@ final class DeepSeekSource: UsageSource {
     /// Manual fallback (or "not set") shown when the balance is unavailable.
     func manualRow(settings: Settings, fx: FX, note: String?) -> UsageRow {
         let manual = settings.manualDeepseekBalance
-        let value = manual.map { fx.display(Money($0, "USD")).text } ?? "not set"
+        let value = manual.map { formatMoney(Money($0, "USD")) } ?? "not set"
         return UsageRow(
             id: id,
             title: "DeepSeek API",
             value: value,
-            footnote: [note ?? "manual balance", manual.flatMap { fx.display(Money($0, "USD")).detail }].compactMap { $0 }.joined(separator: " · "),
+            footnote: note ?? "manual balance",
             tag: manual == nil ? .none : .manual,
             updated: nil
         )

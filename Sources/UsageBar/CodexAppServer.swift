@@ -30,7 +30,7 @@ enum CodexAppServer {
     private static let handshakeTimeout: TimeInterval = 10
     private static let responseTimeout: TimeInterval = 20
     private static let terminationGrace: TimeInterval = 2
-    private static let minimumInterval: TimeInterval = 600
+    private static let minimumInterval: TimeInterval = 100
     /// A cached snapshot older than this is not worth showing as live.
     private static let maxCacheAge: TimeInterval = 1200
 
