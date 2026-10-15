@@ -281,14 +281,16 @@ final class OpenCodeSource: UsageSource {
                                      fiveReset: reading.fiveHourReset, weekReset: reading.weekReset)
         let note = limitHit
             ? "Go limit hit (OpenCode error)"
-            : "est: $\(String(format: "%.2f", snapshot.spentSince)) spent since console check \(relativeAge(stamp, now: now))"
+            : "+$\(String(format: "%.2f", snapshot.spentSince)) since check \(relativeAge(stamp, now: now))"
         let footnote = [reading.row.footnote, note].compactMap { $0 }.joined(separator: " · ")
         out.row = UsageRow(
             id: reading.row.id,
             title: reading.row.title,
             value: parts.joined(separator: " · "),
             footnote: footnote,
-            tag: .estimated,
+            // A fresh console reading plus measured local spend is live data;
+            // EST is kept for real fallbacks (no console reading at all).
+            tag: .live,
             updated: now,
             debug: reading.row.debug,
             alert: limitHit,
