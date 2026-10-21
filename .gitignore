@@ -1,2 +1,8 @@
 .build/
 build/
+.env
+.env*
+*.zip
+settings.json
+claude.json
+ovh.env
